@@ -1,0 +1,14 @@
+.env
+third_party/
+runs/
+.pi-clean/
+data/private/
+data/cache/
+data/rubrics/
+data/multiturn/
+data/multiturn_paper/
+docs/traces/
+reference/
+__pycache__/
+.DS_Store
+node_modules/
