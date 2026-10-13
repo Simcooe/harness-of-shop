@@ -184,8 +184,9 @@ def evaluate_task(task_dir: Path, gold: dict, products: dict, conflicts: set, us
     else:
         rec["success_class"] = None
 
-    # 3. 失败诊断：只对不可接受的失败做首错定位
-    if not rec["strict_success"] and not rec["acceptable_core"]:
+    # 3. 失败诊断：所有没有严格成功的题都做首错定位。买了可接受替代品的题也算，
+    #    否则"商品买对了、有规格没点"这类失败会因为买到的商品可以接受而被漏掉
+    if not rec["strict_success"]:
         rec["first_error"] = first_error(traj, g, cl["false_purchase_claim"])
     else:
         rec["first_error"] = None
@@ -301,7 +302,9 @@ def summarize(recs: list) -> str:
 
     L.append("【3 失败诊断】")
     fe = Counter(STAGE_NAMES.get(r["first_error"]["type"], r["first_error"]["type"]) for r in valid if r["first_error"])
-    L.append(f"  不可接受的失败 {sum(1 for r in valid if r['first_error'])} 题，首错类型 {dict(fe.most_common())}")
+    L.append(f"  没有严格成功 {sum(1 for r in valid if r['first_error'])} 题，首错类型 {dict(fe.most_common())}")
+    bad = Counter(STAGE_NAMES.get(r["first_error"]["type"], r["first_error"]["type"]) for r in valid if r["first_error"] and not r["acceptable_core"])
+    L.append(f"    其中买的东西不可接受的 {sum(bad.values())} 题，首错类型 {dict(bad.most_common())}")
     L.append(f"  漏斗：gold 被搜到 {pct(sum(r['retrieved_at'] is not None for r in valid), n)} → 被打开 {pct(sum(r['opened_at'] is not None for r in valid), n)}"
              f" → 规格全对 {pct(sum(r['options_correct_at'] is not None for r in valid), n)} → 买下 {pct(len(succ), n)}")
 
