@@ -84,9 +84,11 @@
 
 **备选方向 B（一句话给用户）**：harness 自动优化，让一个 agent 读评测器给出的失败轨迹和首错定位，自动提出新的 harness 规则并在开发集上验证，保留有提升的。更吸引眼球，但结果不确定，适合在面试里当"下一步"来讲。
 
-### 2.3 测试集（论文多轮设置下还没跑，要用户同意）
+### 2.3 测试集（论文多轮设置，已跑完）
 
-建议在第三版定下来以后一次性跑：原版、论文提示词、插件全开、v2，加上第三版，各 200 题，带 LLM 评审。命令见第 4 节。测试集的开场白还没生成。
+用户同意后，四组各跑一次并带 LLM 评审：原版 50%、论文提示词 58%、插件全开 64%、v2 84%（严格成功），结果见第 5 节和 `docs/harness_design.md` 第七节。评审发现 v2 的"决策质量"没有提高：收尾让 agent 在用户拒绝后仍然下单，评审认为这违背用户意愿。第三版如果要做，可以把这一点当作要改进的地方（比如收尾时先把最接近的商品推荐给用户、说明差在哪里，而不是直接下单）。
+
+第三版做完后，测试集只需要再跑第三版这一组，和这四组配对比较。
 
 ## 3. 代码结构
 
@@ -125,7 +127,7 @@ scripts/run_ablation.sh / run_addone.sh   v0 消融（已指向 plugin_v0.ts）�
 eval/                  评测，见第 6 节
 data/rubrics/          300 题冻结的需求约束（开发集 100 + 测试集 200）
 data/multiturn/        dev.jsonl（100 题：信息缺失 83 + 对照 17）、test.jsonl（199 题：164 + 35；1 题校验没过，在 test_rejected.jsonl）
-data/multiturn_paper/  论文多轮的开场白：dev_openings.jsonl（100 题）；测试集还没生成
+data/multiturn_paper/  论文多轮的开场白：dev_openings.jsonl（100 题）、test_openings.jsonl（200 题）
 data/cache/            products_min.json、gold_selfcheck_{dev,test}.jsonl、shopper_probe_dev.jsonl、llm/（LLM 调用缓存）
 third_party/shopsim_official/  从官方仓库取的提示（没有许可证，gitignore）：
                        shopper_paper.md（官方配置 multi_eval/configs/standard/qwen3_8b.yaml 里的买家提示 + 任务模板）、
@@ -169,7 +171,7 @@ python3 runner/run.py --run-name test_mt_D --multiturn data/multiturn/test.jsonl
 
 我们自己的多轮四组：A 直接用单轮 v1 的结果；B `--multiturn --plugin all`（不加 `--ask`）；C `--multiturn --ask --plugin guard,nudge`；D `--multiturn --ask --plugin all`。
 
-论文多轮：先生成开场白（测试集还没生成）：
+论文多轮：开场白已为开发集和测试集生成；新的题目列表用这个命令生成：
 
 ```bash
 python3 scripts/make_paper_openings.py --tasks data/test_ids.json --out data/multiturn_paper/test_openings.jsonl
@@ -243,6 +245,19 @@ python3 eval/recovery.py --multiturn data/multiturn/test.jsonl --A runs/test200_
 - 开场白平均只说出 21% 的需求约束。
 - 和论文数字只能当参考：论文多轮最强 38%、训练后约 35%，我们的原版已经 43%，但模型、题目子集、买家模型都不同。
 
+### 论文多轮设置，测试集 200 题（每组一次，带评审）
+
+| 组 | 严格成功 | 可接受购买 | 有购买 | 决策质量均分 | 平均 prompt token |
+|---|---|---|---|---|---|
+| 原版 | 50% | 50% | 54% | 1.62 | 300K |
+| 论文提示词 | 58% | 59% | 65% | 1.53 | 230K |
+| 插件全开 | 64% | 68% | 78% | 1.69 | 207K |
+| v2 | 84% | 89% | 100% | 1.62 | 185K |
+
+- 原版 → v2 +34（76 题变好、8 题变差，p = 5e-15）；论文提示词 → v2 +25.5（p = 2e-9）；插件全开 → v2 +20（p = 1e-8）。
+- 原版 → 插件全开 +14（p = 0.002）；原版 → 论文提示词 +8.5（p = 0.06）；论文提示词 → 插件全开 +5.5（p = 0.27）。
+- v2 决策质量 0 分的 28 题里 27 题触发过"现在必须下单"（16 题其实买对了），评审理由都是"用户拒绝后仍下单"。
+
 ### runs 目录索引
 
 | 运行 | 内容 | 是否带评审 |
@@ -256,6 +271,7 @@ python3 eval/recovery.py --multiturn data/multiturn/test.jsonl --A runs/test200_
 | test_mt_B/C/D | 测试集，我们自己的多轮 | 是 |
 | dev_paper_off / dev_paper_prompt / dev_paper_all | 开发集，论文多轮：原版 / 论文提示词 / 插件全开 | 否 |
 | dev_paper_choice / dev_paper_closing / dev_paper_v2 | 开发集，论文多轮：全开 + 规格选择题 / 全开 + 收尾 / 全开 + 两者 | 否 |
+| test_paper_off / test_paper_prompt / test_paper_all / test_paper_v2 | 测试集，论文多轮：原版 / 论文提示词 / 插件全开 / v2 | 是 |
 | smoke* | 冒烟测试，可忽略 | 否 |
 
 ## 6. 评测器（单轮部分已由用户抽查确认并锁定）
@@ -282,6 +298,7 @@ python3 eval/recovery.py --multiturn data/multiturn/test.jsonl --A runs/test200_
   - 在我们的运行脚本里照官方代码复现论文的多轮规则（"可以，那你做吧"）。
   - 先做收尾和规格选择题（"那你先优化 harness 吧"）；实验不用太严谨。
   - "论文提示词"对比组是会话自己加的，汇报过，用户没有反对。
+  - 测试集上论文多轮四组已跑完并评测（"那后续就先跑下测试集和测评吧"）。
 - 尚未拍板：第三版 harness 的方向和第 2.2 节的拍板点；测试集什么时候跑；个性化要不要做；空详情子页要不要拦（之前定的是保持现状，论文设置下回合是瓶颈，约五分之一的环境步花在空子页上，可以重新提给用户）。
 
 ## 8. 坑和注意事项

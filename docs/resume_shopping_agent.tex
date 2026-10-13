@@ -1,0 +1,15 @@
+\datedsubsection{\textbf{Shopping Agent：面向长程多轮导购的 Harness 优化与过程评测}}{2026.10 - 至今}
+项目背景: 针对购物 Agent 的多步约束遗漏与无效循环，在 ShopSimulator 中不改模型权重、搭建可插拔 Harness，以轨迹分析驱动 Harness 迭代，提升可执行策略与需求完成能力。
+
+
+\begin{itemize}[parsep=0.5ex]
+ \item \textbf{Harness 架构设计}: 基于 pi 事件钩子构建可插拔组件，在关键节点注入约束与上下文：拦截非法动作并回传可操作目标、针对未确认规格触发澄清、下单前校验规格是否经用户确认、临近回合上限时基于已浏览候选收敛决策；支持组件级消融，严格成功率 50\% $\rightarrow$ 84\%（纯提示词方案 58\%），下单率 54\% $\rightarrow$ 100\%
+\end{itemize}
+
+\begin{itemize}[parsep=0.5ex]
+ \item \textbf{过程评测体系}: 不依赖环境奖励，构建三层评测：结果层将需求拆解为原子约束 rubric，逐条核验所购商品；过程层比对 Agent 自述与执行日志，识别虚假完成；裁判层由 LLM 按 5 个维度评估轨迹，识别出 28 例违背用户意愿下单
+\end{itemize}
+
+\begin{itemize}[parsep=0.5ex]
+ \item \textbf{失败归因与迭代}: 以“检索$\rightarrow$详情$\rightarrow$规格$\rightarrow$下单”里程碑漏斗为主线，结合逐步页面状态定位首个错误动作并归为 9 类，再分类回放轨迹溯源；定位出占失败 85\% 的两类根因：非法动作被环境静默吞没、用户拒绝后陷入对话循环直至回合耗尽，据此迭代对应组件
+\end{itemize}
