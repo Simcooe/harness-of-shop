@@ -82,6 +82,11 @@ def verification(traj: Trajectory, rubric: dict, check_results: list) -> dict:
 
 
 def final_words(traj: Trajectory) -> str:
+    if traj.roles:
+        # 分工模式：导购调用 buy 的那次调用和它前面两次（回合号对不上导购的调用编号）
+        idx = max((i for i, a in enumerate(traj.assistant) if any(c["name"] == "buy" for c in a["calls"])), default=None)
+        msgs = traj.assistant[max(0, idx - 2): idx + 1] if idx is not None else traj.assistant[-2:]
+        return "\n\n".join(a["text"][:2000] for a in msgs if a["text"])
     turn = traj.buy_turn()
     if turn is not None:
         msgs = [a for a in traj.assistant if a["turn"] in (turn - 1, turn)]
@@ -232,7 +237,7 @@ def interventions(traj: Trajectory) -> dict:
     return stats
 
 
-BUY_BLOCKS = {"state_verify_block": "下单前对表核对", "confirm_block": "购买前确认"}
+BUY_BLOCKS = {"state_verify_block": "下单前对表核对", "confirm_block": "购买前确认", "roles_consent_block": "用户点头才下单"}
 
 
 def buy_blocks(traj: Trajectory, gold: dict) -> list:

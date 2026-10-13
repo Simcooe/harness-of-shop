@@ -1,6 +1,6 @@
-# 交接文档（2026-10-12 晚，第二版）
+# 交接文档（2026-10-13 晚，第三版）
 
-给接手的会话：先读完第 0、1、2 节再动手。项目根目录 `/Users/ywwl/long-horizon-harness`。设计细节和每一轮的实施记录在 `docs/harness_design.md`（第七节是本轮的论文多轮复现和新组件）。
+给接手的会话：先读完第 0、1、2 节再动手。项目根目录 `/Users/ywwl/long-horizon-harness`。设计细节和每一轮的实施记录在 `docs/harness_design.md`（第七节论文多轮复现和 v2，第八节第三版，第九节第四版）。
 
 ## 0. 工作方式（用户明确要求过，必须遵守）
 
@@ -29,66 +29,30 @@
 2. 主线改为"会问问题的导购 agent"。ShopSimulator 论文本身就把多轮澄清当核心难点：多轮场景最强的 Claude-4-Sonnet 38%、GPT-5 29%，SFT+RL 训练后的 Qwen3-8B 约 35%，论文自己说这是没解决的挑战。论文除了提示词（"信息不全先问、下单前确认"）和训练，没有专门的提问方法。yyhdbl 直接跳过了多轮（只做单轮、禁止追问）。
 3. 我们之前自己搭的多轮设置（删规格信息、最多问 3 次）和论文不同，分数不能和论文比。于是**照官方代码复现了论文的多轮规则**（只在开发集上跑过）。
 4. 在论文设置下加了"收尾"和"规格选择题"两个组件，开发集严格成功：原版 43% → 最终组合 81%。
-5. 用户觉得现在的设计"没有想象空间"。上个会话建议的下一步是**把任务状态显式化**（第 2.2 节），用户还没拍板，就让新会话接手。
+5. 用户觉得 v2 的设计"没有想象空间"，于是做了**第三版：把任务状态显式化**（需求表 + 商品表，`docs/harness_design.md` 第八节）。成功率和 v2 看不出差别（79% 对 81%），回合更多。同时给评测器加了失败原因诊断和拦截审计。
+6. 用户担心"harness 自进化"会忽略这个场景本身的痛点，也觉得"发现问题、加插件堵漏洞"很难讲故事。主线定为论文场景的痛点：**用户点头后再买，而且要买对**。
+7. **第四版：前台导购 + 后台买手**（第九节）。导购只和用户说话，买手只在商店里干活，两边只传核对过的事实，规矩只剩"用户点头才能下单"。开发集严格成功 91%，"用户点头后买对"61%（v2 是 81% 和 33%）。
 
 ## 2. 当前停在哪、下一步做什么
 
-### 2.1 本轮已完成
+### 2.1 当前状态（2026-10-13 晚）
 
-- **论文多轮规则复现**（实现细节和与官方的差异见 `docs/harness_design.md` 第七节）：
-  - 买家用官方配置里的提示（所有属性确认前一律拒绝下单），拼上完整需求和标准答案规格选项；开场先问买家"请提供您的购物需求。"，买家的回复（中位数 18 个字）就是 agent 收到的第一句话，每题冻结在 `data/multiturn_paper/`。
-  - 提问不限次数，提问和操作合计 40 个回合；每条返回附"轮次: N"。
-  - agent 直接回复的文字会被适配层转给买家，买家的回答作为下一条消息发回（官方流程只有下单或回合用完才结束）。
-  - 买家模型用 qwen3.7-plus（官方 qwen3-235b 代理上没有）。
-- **新组件**（都不在 "all" 里，"插件全开"仍可和之前比较）：
-  - `closing` 收尾：剩 ≤12 回合起提醒剩余回合；剩 ≤6 回合或用户说了再见时，要求立即下单并附上看过的商品清单；这时不再做购买前确认和提问提示。提示里必须引用官方任务规则（"对话结束时用户仍不满意，就买最接近需求的那一件，不需要用户同意"），否则用户说"不买"后模型会拒绝下单。
-  - `choice` 规格选择题：提问提示里把还没定的规格选项原样列出，让 agent 请用户直接挑。
-- **开发集结果**见第 5 节。收尾是主要贡献（64% → 79%）；规格选择题作用小。
-- 用户被告知过一个设计上的张力：收尾等于在买家拒绝后仍然下单。论文打分要求最后必须买，但论文的错误分析也把"买家拒绝后还下单"算作错误；真实产品里收尾应该是"推荐最合适的一款让用户决定"。
+- 第四版在开发集上跑完并评测（结果见第 5 节和 `docs/harness_design.md` 第九节），代码和文档已提交到 task-state 分支。
+- **等用户决定：**测试集（Final-200）要不要跑第四版。只需要跑这一组，和 `test_paper_v2` 配对比较；要带评审的话，先做下面 2.2 的第一条。
+- `docs/diagnosis_check.md`（失败原因诊断的抽查清单，附 Claude 的判断）还在等用户确认，没有提交。
+- 所有实验结束后提醒用户轮换模型代理的密钥。
 
-### 2.2 推荐的下一步：显式维护任务状态（第三版 harness，用户还没拍板）
+### 2.2 可能的下一步
 
-**接手后第一件事：用大白话、简短地把这个方案和下面的拍板点给用户看，等用户确认再做。** 用户的原话是"让另一个会话执行后面的"，但第 0 节的规则仍然适用。
+1. **评审要能看懂分工模式的轨迹**（只有测试集带评审时需要）：`eval/judge.py` 的 `render_trajectory` 按 LLM 调用的序号排导购说的话，而分工模式下日志里的回合是对外的动作，要用工具结果里的"轮次: N"对齐；买手和系统下单的动作要标出是谁做的（`env_steps.jsonl` 的 `who` 字段）；`roles_*` 事件（派买手、候选单、没经同意的下单被拦、收尾）要渲染出来；评审提示里说明分工。旧运行的渲染结果不能变（评审有缓存）。
+2. 第四版还没解决的问题（第九节末尾）：导购不接受用户的拒绝（33 题里 144 次没经同意的下单被拦）；收尾翻倍（用户要确认页面上没写的信息时拿不到同意）；买手重复打开同一件商品。
+3. `docs/narrative.md` 和 `docs/resume_draft.md` 按"用户点头后买对"的新主线改写（简历格式见用户的要求：一句背景 + 错误分析 / harness 优化 / 测评三点，每点"现象 → 原因 → 结果"）。
 
-**动机（给用户讲的版本）**：现在的几个组件都是"看到一种失败、打一个补丁"，背后是同一个原因：agent 心里没有一份清楚的任务状态。用户要什么、哪些确认了、哪些还没问，看过的商品各满足哪几条，还剩多少回合，这些都埋在越来越长的对话里（论文设置下每题平均 18 万到 31 万个 prompt token，大部分在重复读历史），模型自己记不清，只好靠插件在各个时刻提醒。
+第三版当初的设计草图和拍板点都已实施，见 `docs/harness_design.md` 第八节；备选方向"harness 自动优化"用户担心会忽略场景本身的痛点，没有做。
 
-**设计草图**：
-- **需求表**：每条需求（品类、品牌、预算、颜色、尺码、功能……）标成"已确认 / 还不知道"，附用户原话。每次买家回答后用一个小模型从对话里抽取更新，只依据用户说过的话。
-- **商品表**：对看过的每件商品，逐条记"满足 / 不满足 / 页面上没写"，只记页面上真实出现的事实（每次打开商品详情页后更新）。
-- **基于两张表做决策**：缺哪条问哪条；商品对表满足了才买；下单前对照表格核验，不靠 agent 自述；回合不够时按表选最好的那件。
-- **上下文瘦身**：agent 每一步只看系统提示、两张表和最近几步，不再带全部历史。
-- 现有组件都能放进这个框架：提问提示 = 问表里缺的需求；购买前确认 = 对表核验；收尾 = 回合不够时按表选最好的；规格选择题 = 问缺的规格时把选项列出来。
+### 2.3 测试集（论文多轮设置）
 
-**故事和想象空间**：
-- 从"一堆补丁"变成"一个架构"，能讲清设计思想。
-- 和 reference 里阿里的 LongHorizon-Harness（arXiv 2608.01964）一脉相承：它的核心是把任务状态放到执行之外维护、只用独立核验过的事实更新（Manage-Execute-Audit 循环：管理器维护状态并定下一个子任务，新上下文的执行器执行，只读的核验器核实环境状态）。但它只管环境里的状态；这里扩展到"用户需求"这种要靠对话才能拿到的状态，是它没做的。
-- 能推广：
-  - **个性化**：ShopSimulator 的个性化场景可以接进来，画像信息先记成"推测"，关键的再问用户，正好对着论文的两类个性化错误（没用上画像 55.8%、过度解读画像 35.7%）。
-  - **多件商品、换领域**（订机票、订酒店）：都是往表里加东西。
-- 新的可量化收益：token 大幅下降，提问更少更准；成功率不一定比 81% 高多少（已接近单轮"需求说全"时的 86%）。
-
-**需要用户拍板的点（附推荐）**：
-1. **表由谁维护**：每次买家回答或打开商品后调一次小模型（V4 Flash，非思考）抽取（推荐，通用）；还是用规则匹配（便宜，但不通用）。
-2. **上下文**：只给"系统提示 + 两张表 + 最近 K 步"（推荐，K 先取 6 左右，不调）；还是保留全部历史、另外附表（改动小，但省不了 token）。
-3. **决策由谁做**：仍由 agent 决定，表作为输入，插件在关键时刻提醒（推荐，改动适中）；还是像 LongHorizon-Harness 那样由管理器定下一个子任务、执行器只做子任务（更彻底，工作量大）。
-4. **个性化要不要放进来**：开发集 16 题、测试集 38 题有改写需求，可以做；但 reset 对每题都返回 `user_persona`，可能是占位，要先核实（见第 8 节）。推荐先不放，第三版跑通后再加。
-5. **对比组**：开发集上和 v2（`all,closing,choice`）比成功率、token、提问次数。
-
-**实现提示**：
-- pi 的 `context` 事件可以在每次调用模型前替换消息列表（`pi.on("context", e => ({ messages: [...] }))`，见 pi 的 `core/extensions/runner.js` 的 `emitContext`），用它实现"系统提示 + 两张表 + 最近 K 步"。注意保留工具调用和工具结果的配对，不要切断在一对中间。
-- 页面状态通过适配层发出的 `shop:state` 事件拿到，买家问答通过 `shop:ask` 事件拿到（转发的文字也会触发 `shop:ask`）。
-- pi 的事件总线是 Node EventEmitter，同步调用。插件可以在 `shop:relayed` 事件里往 `notes` 数组追加内容，适配层会附在发回 agent 的买家回答后面（收尾就是这么做的）。
-- 在 TS 里调模型代理可以参考 `pi-shop/adapter.ts` 的 `shopperReply`（`${MODEL_PROXY_BASE_URL}/v1/chat/completions`，DeepSeek 关思考用 `thinking: {type: "disabled"}`）。抽取只能用 agent 能看到的信息（对话和页面），不能用 gold。
-- 建议做成新插件组件或新插件文件，原来的 `plugin.ts` 组件保持可复现。
-- 评测：`eval/evaluate.py` 已经报告 token、提问次数、开场没说的需求被问到的比例；可以加一个面板，把需求表和用户真实需求（`data/rubrics/`）对一下，看抽取准不准（评测侧可以看 gold 和完整需求）。
-
-**备选方向 B（一句话给用户）**：harness 自动优化，让一个 agent 读评测器给出的失败轨迹和首错定位，自动提出新的 harness 规则并在开发集上验证，保留有提升的。更吸引眼球，但结果不确定，适合在面试里当"下一步"来讲。
-
-### 2.3 测试集（论文多轮设置，已跑完）
-
-用户同意后，四组各跑一次并带 LLM 评审：原版 50%、论文提示词 58%、插件全开 64%、v2 84%（严格成功），结果见第 5 节和 `docs/harness_design.md` 第七节。评审发现 v2 的"决策质量"没有提高：收尾让 agent 在用户拒绝后仍然下单，评审认为这违背用户意愿。第三版如果要做，可以把这一点当作要改进的地方（比如收尾时先把最接近的商品推荐给用户、说明差在哪里，而不是直接下单）。
-
-第三版做完后，测试集只需要再跑第三版这一组，和这四组配对比较。
+用户同意后，四组各跑一次并带 LLM 评审：原版 50%、论文提示词 58%、插件全开 64%、v2 84%（严格成功），结果见第 5 节和 `docs/harness_design.md` 第七节。评审发现 v2 的"决策质量"没有提高：收尾让 agent 在用户拒绝后仍然下单，评审认为这违背用户意愿。第三版、第四版都还没在测试集上跑。
 
 ## 3. 代码结构
 
@@ -103,12 +67,18 @@ pi-shop/adapter.ts     环境适配层（所有组都加载）
                        - 论文多轮（SHOP_MAX_QUESTIONS=0）：提问不限次数、计入回合上限；每条返回附"轮次: N"；
                          agent 直接回复的文字会转给买家（ask_log 里 via=text），回答连同插件追加的提示作为下一条消息发回
                        - 通过 pi.events 发出 shop:state / shop:done / shop:ask / shop:relayed 给插件
-pi-shop/plugin.ts      插件 v1，SHOP_PLUGIN 选组件（"all" = guard,nudge,ask_hint,confirm_gate）
+pi-shop/plugin.ts      插件 v1/v2，SHOP_PLUGIN 选组件（"all" = guard,nudge,ask_hint,confirm_gate）；合法性校验导出成 guardCheck 给第四版的买手用
                        - guard 合法性校验；nudge 没买就停下时追问（最多 2 次；论文模式下文字会转给买家，基本用不上）
                        - ask_hint 提问提示；confirm_gate 购买前确认（每件商品拦一次）；dialogue_ledger 可选
                        - closing 收尾、choice 规格选择题：论文多轮设置下加的，"all" 不含
+                       - spec_fill：下单时还有只有一个选项的规格没点，拦一次让 agent 点上（和第四版下单时自动点上对应），"all" 不含
                        - 多轮组件只在 SHOP_ASK=1 时生效；SHOP_MAX_QUESTIONS=0 时不提示"还能问几次"
 pi-shop/plugin_v0.ts   第一版插件（guard,ledger,monitor,audit,finish,contract），原样保留以复现消融
+pi-shop/task_state.ts  第三版：需求表 + 商品表（--state all），在插件之后加载；整理需求表的方法和几个工具函数第四版也在用
+pi-shop/roles.ts       第四版：前台导购 + 后台买手（--roles），和分工模式的适配层（SHOP_ROLES=1）一起加载
+                       - 导购的工具 find_products / show_candidates / buy；买手每次找货用 SDK 新开一个 pi 会话（buyer_sessions/）
+                       - 通过 pi.events 的 "shop:api" 拿到适配层的商店接口；下单由系统按候选单回到商品页、点好规格再买
+prompts/roles_sales.md 第四版导购的系统提示；prompts/roles_buyer.md 买手的系统提示
 prompts/base.md        基线系统提示（所有组共用，只有一句话）
 prompts/shopper.md     我们自己多轮设置的模拟买家提示（已冻结）
 runner/run.py          批量运行：reset → 写 reset_public.json → 启动干净的 pi 进程 → release → done.json
@@ -117,6 +87,7 @@ runner/run.py          批量运行：reset → 写 reset_public.json → 启动
                        --paper-openings <jsonl> 开启论文多轮模式（自动 ask、不限提问次数、40 回合上限、官方买家提示、
                        买家回答最多 512 token）。run_config.json 里记 protocol = single / ours / paper。
                        已有 done.json 的题会跳过（中断后重跑同名即可续跑）。环境槽位满时 reset 会等待重试。
+                       --state off|all|组件、--state-window K（第三版）；--roles（第四版，只能和 --paper-openings 一起用）。
 runner/paper_protocol.py   论文多轮规则：按官方 shopper.reset 拼买家系统提示（官方买家提示 + 完整需求 + 标准答案规格选项）
 scripts/export_tasks.py    导出 data/test_ids.json（作者 Final-200）、data/dev_ids.json、data/private/gold.jsonl
 scripts/make_multiturn.py  构造模糊需求（删掉规格类约束，规则 + LLM 校验）→ data/multiturn/<split>.jsonl
@@ -182,15 +153,24 @@ python3 scripts/make_paper_openings.py --tasks data/test_ids.json --out data/mul
 - 论文提示词：同上，加 `--system-prompt-file third_party/shopsim_official/agent_paper.md`
 - 插件全开：`--plugin all`
 - v2：`--plugin all,closing,choice`
+- v2 + 规格补点：`--plugin all,closing,choice,spec_fill`
+- 第三版：`--plugin guard,nudge --state all`（只给最近 6 步）；加 `--state-window 0` 保留全部历史
+- 第四版：`--roles`（自动用 `prompts/roles_sales.md` 和 `prompts/roles_buyer.md`，买手和导购用 `--model` 指定的同一个模型）
 
 ```bash
 python3 runner/run.py --run-name dev_paper_v2 --paper-openings data/multiturn_paper/dev_openings.jsonl --plugin all,closing,choice --workers 5
 ```
 
-**评测**：`--judge` 会调 V4 Pro 做过程评审，有缓存，可以多个评测并行跑。开发集一般不带评审。
+```bash
+python3 runner/run.py --run-name dev_paper_v4 --paper-openings data/multiturn_paper/dev_openings.jsonl --roles --workers 6
+```
+
+第四版开发集 100 题、6 个 worker 约 20 分钟。
+
+**评测**：`--judge` 会调 V4 Pro 做过程评审，有缓存，可以多个评测并行跑。开发集一般不带评审。`--diagnose` 加失败原因诊断。论文多轮的运行会自动判断下单前用户有没有点头（V4 Pro，有缓存）。分工模式的运行暂时不要带 `--judge`（见 2.2 第一条）。
 
 ```bash
-python3 eval/evaluate.py runs/dev_paper_v2 --workers 8
+python3 eval/evaluate.py runs/dev_paper_v4 --diagnose
 ```
 
 ```bash
@@ -245,6 +225,20 @@ python3 eval/recovery.py --multiturn data/multiturn/test.jsonl --A runs/test200_
 - 开场白平均只说出 21% 的需求约束。
 - 和论文数字只能当参考：论文多轮最强 38%、训练后约 35%，我们的原版已经 43%，但模型、题目子集、买家模型都不同。
 
+### 论文多轮设置，开发集：第三版和第四版（每组一次，不带评审）
+
+| 组 | 运行参数 | 严格成功 | 可接受购买 | 用户点头后买对 | 平均回合 | 平均 prompt token |
+|---|---|---|---|---|---|---|
+| v2 | `--plugin all,closing,choice` | 81% | 86% | 33% | 19.3 | 182K |
+| 第三版，保留全部历史 | `--plugin guard,nudge --state all --state-window 0` | 79% | 84% | 没算 | 23.2 | 263K（另有小模型 14K） |
+| 第三版，只给最近 6 步 | `--plugin guard,nudge --state all` | 77% | 82% | 没算 | 22.6 | 116K（另有小模型 11K） |
+| v2 + 规格补点 | `--plugin all,closing,choice,spec_fill` | 85% | 85% | 40% | 22.1 | 221K |
+| 第四版 | `--roles` | 91% | 91% | 61% | 22.2 | 113K（另有小模型 22K） |
+
+- "用户点头后买对"：严格成功，而且下单前用户最后一句话明确同意。v2 → 第四版 36 题变好、8 题变差，差距明显；严格成功 14 好 4 差。
+- 下单前用户最后一句话（同意 / 没表态 / 刚说完不买 / 没问过）：v2 是 37 / 45 / 13 / 5，第四版是 62 / 5 / 33 / 0。第四版"没表态"的 5 次和"刚说完不买"的 33 次都是按官方规则收尾时买的。
+- 第四版的代价：收尾从 20 题涨到 40 题；导购不接受用户的拒绝，没经同意的下单被拦了 144 次。细节见 `docs/harness_design.md` 第九节。
+
 ### 论文多轮设置，测试集 200 题（每组一次，带评审）
 
 | 组 | 严格成功 | 可接受购买 | 有购买 | 决策质量均分 | 平均 prompt token |
@@ -272,6 +266,9 @@ python3 eval/recovery.py --multiturn data/multiturn/test.jsonl --A runs/test200_
 | dev_paper_off / dev_paper_prompt / dev_paper_all | 开发集，论文多轮：原版 / 论文提示词 / 插件全开 | 否 |
 | dev_paper_choice / dev_paper_closing / dev_paper_v2 | 开发集，论文多轮：全开 + 规格选择题 / 全开 + 收尾 / 全开 + 两者 | 否 |
 | test_paper_off / test_paper_prompt / test_paper_all / test_paper_v2 | 测试集，论文多轮：原版 / 论文提示词 / 插件全开 / v2 | 是 |
+| dev_paper_v3_w0 / dev_paper_v3_w6 | 开发集，第三版：保留全部历史 / 只给最近 6 步 | 否 |
+| dev_paper_v2fill / dev_paper_v2fill_pilot | 开发集，v2 + 规格补点：100 题 / 试跑 20 题 | 否 |
+| dev_paper_v4 / dev_paper_v4_pilot / dev_paper_v4_pilot2 | 开发集，第四版：100 题 / 第一轮试跑 / 改完后第二轮试跑（各 20 题） | 否 |
 | smoke* | 冒烟测试，可忽略 | 否 |
 
 ## 6. 评测器（单轮部分已由用户抽查确认并锁定）
@@ -290,6 +287,8 @@ python3 eval/recovery.py --multiturn data/multiturn/test.jsonl --A runs/test200_
   - 用到的事实：每条需求买的那件和正确商品各自满不满足（评测器核对 + 标准答案自检 `data/cache/gold_selfcheck_*.jsonl`）；每条需求用户第几回合说过（V4 Flash 判断，必须引用原话，原话在对话里找不到就不算）；正确商品什么时候出现过、harness 拦过哪些购买（日志）；买对了商品但规格不对时，按用户的话和预算能不能确定选哪个（V4 Pro 只回答选哪个）；正确商品没搜到时，单轮实验的运行用什么词搜到过它，以及这些词按用户当时说过的话想不想得到（V4 Pro 逐词判断）。
   - 判定顺序：系统拦下了正确的购买 → 动作无效 → 没买成 → 买对了商品时看规格（单选项没点 = 规格没点；能推出来 = 规格没点 / 规格选错；推不出来 = 没问清需求）→ 正确商品满足的买的也都满足 = 替代品也满足需求 → 单轮实验也从没搜到 = 正确商品难搜到 → 用户说过、正确商品不满足而买的满足 = 标准答案有问题 → 用户说过某条正确商品更好的条件之后正确商品又出现 = 没回头（买的那件明确不满足的条件优先，这些全是用户没说过的就是没问清需求）→ 之后没再出现：对照的搜索词想得到 = 搜索词不对，否则没问清需求。"回合用完被迫下单""追查页面上没有的信息"作为附加标签。
   - 准确性：设计时看过两批，23 道全部对上，27 道里 22 道对上、5 道有争议，但都参与了定规则；没参与设计的 dev_paper_closing 先盲标 15 道再对答案，14 道一致（不一致的那道是页面本身说不清该选哪个规格）；提示词改几个字重跑 84 道，原因全部不变。抽查清单 `docs/diagnosis_check.md`（`scripts/make_diagnosis_check.py` 生成，附 Claude 的判断，**等用户确认**）。
+- **用户点头**（`eval/consent.py`，第 1 个面板，论文多轮的运行才有）：V4 Pro 读下单那个回合之前用户的最后一次回答，判成明确同意 / 没表态（还在补充需求或提问）/ 刚说完不买 / 没问过用户。"用户点头后买对" = 严格成功且明确同意。
+- **分工模式**（第四版）：用掉的回合按日志里对外动作的回合号算（`traj.turns_used`），不等于导购的 LLM 调用次数；token 含买手会话（`buyer_sessions/`）；收尾事件是 `roles_close_hard`。
 - **拦截审计**（`process.buy_blocks`，第 5 个面板）：harness 每拦下一次购买，看被拦时选的是不是正确商品和全对的规格（放行会不会严格成功），以及这些题最后有没有买对。
 - **状态卡的规格标注**（`state_check.card_specs`，第 8 个面板）：状态卡给正确商品标的"用户要"规格和正确规格对不对得上。
 
@@ -305,7 +304,11 @@ python3 eval/recovery.py --multiturn data/multiturn/test.jsonl --A runs/test200_
   - 先做收尾和规格选择题（"那你先优化 harness 吧"）；实验不用太严谨。
   - "论文提示词"对比组是会话自己加的，汇报过，用户没有反对。
   - 测试集上论文多轮四组已跑完并评测（"那后续就先跑下测试集和测评吧"）。
-- 尚未拍板：第三版 harness 的方向和第 2.2 节的拍板点；测试集什么时候跑；个性化要不要做；空详情子页要不要拦（之前定的是保持现状，论文设置下回合是瓶颈，约五分之一的环境步花在空子页上，可以重新提给用户）。
+- 2026-10-13：
+  - 第三版按推荐的拍板选项做（"那你新建一个分支吧，在这个分支上开发后续的"）：main 冻结，后续都在 task-state 分支。
+  - 主线改为场景本身的痛点"用户点头后再买，还要买对"，不做"harness 自动优化"。
+  - 第四版前台导购 + 后台买手（"做吧"）：主指标"用户点头后买对"，同时看严格成功；先在开发集试跑 20 题看点头率和回合数，没问题再跑全量；v2 也补上规格补点，比较公平。
+- 尚未拍板：测试集要不要跑第四版；个性化要不要做；空详情子页要不要拦（之前定的是保持现状，论文设置下回合是瓶颈，约五分之一的环境步花在空子页上，可以重新提给用户）。
 
 ## 8. 坑和注意事项
 
@@ -328,7 +331,10 @@ python3 eval/recovery.py --multiturn data/multiturn/test.jsonl --A runs/test200_
 - **换模型**：`.pi-clean/models.json` 现在只配了 `deepseek-v4-flash`。新模型在 yowant provider 下加条目，用 `--model yowant/<id>` 指定。关思考的参数各家不同：DeepSeek `thinking: {type: disabled}`，Qwen `enable_thinking: false`，GPT 系列要先试。代理上可选 `gpt-6-astra`、`gpt-6-luna`、`gpt-6-sol`、`gpt-6.1-sol`、`qwen3.8-flash`、`qwen3.8-max`；`deepseek-v4-pro` 是评审模型，不能当 agent；多轮换模型要避开 Qwen 家族（模拟买家是 qwen3.7-plus）。
 - **LLM 缓存**（`data/cache/llm/`）是原子写入，可以多个评测并行跑。
 - **auto 模式**的安全分类器偶尔不可用，Bash 会被拒；等一下重试即可。
-- 项目还不是 git 仓库。`.gitignore` 里已有 `.env`、`third_party/`、`runs/`、`data/private/`；公开前还要考虑 `data/cache/`、含 query 原文的 `data/rubrics/`、`data/multiturn/`、`data/multiturn_paper/`（数据集许可不明）。
+- **模型代理偶尔连不上**：2026-10-13 下午断过一次（直连超时，走本机代理 127.0.0.1:7897 时握手失败），过一阵自己恢复。跑实验前用 curl 测一下，只打印状态码，不要打印地址和密钥。
+- **跑实验时不要改 `pi-shop/` 和 `prompts/`**：每道题启动新的 pi 进程时才读这些文件，中途改了，后面的题就用上了新代码。
+- **分工模式**：roles.ts 加载时通过 `pi.events.emit("shop:api", 回调)` 向适配层要商店接口，所以适配层必须先加载（runner 已经按这个顺序传 `-e`）；`context` 事件的处理函数是 await 的，系统替导购下单就在这里做；买手会话用自定义的最小 ResourceLoader，不发现任何扩展、技能和上下文文件。
+- 项目是 git 仓库：main 冻结，后续工作在 task-state 分支，推到 `git@github.com:Simcooe/harness-of-shop.git`（**公开仓库**，不能提交密钥；`.pi-clean/` 里有代理地址，已 gitignore）。`.gitignore` 里已有 `.env`、`third_party/`、`runs/`、`data/private/`；公开前还要考虑 `data/cache/`、含 query 原文的 `data/rubrics/`、`data/multiturn/`、`data/multiturn_paper/`（数据集许可不明）。
 - `docs/narrative.md`（简历和面试问答）还是旧主线，没按"会问问题的导购 agent + 论文多轮设置"改写；README 也还没写论文多轮的结果。
 
 ## 9. 不再是主线的旧方案（需要时参考）

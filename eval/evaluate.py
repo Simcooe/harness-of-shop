@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from asking import analyze as analyze_asking, load_multiturn, paper_multiturn  # noqa: E402
 from checker import load_products, load_rubric  # noqa: E402
+from consent import consent  # noqa: E402
 from diagnose import diagnose  # noqa: E402
 from judge import DIMENSIONS, judge  # noqa: E402
 from process import buy_blocks, claims, first_error, interventions, outcome, verification  # noqa: E402
@@ -137,12 +138,13 @@ def evaluate_task(task_dir: Path, gold: dict, products: dict, conflicts: set, us
         "gold_conflict": traj.task_id in conflicts,
     })
     usage = Counter()
-    for a in traj.assistant:
-        u = a["usage"]
+    for u in [a["usage"] for a in traj.assistant] + traj.buyer_usage:
         usage["prompt"] += u.get("input", 0) + u.get("cacheRead", 0)
         usage["cached"] += u.get("cacheRead", 0)
         usage["output"] += u.get("output", 0)
-    rec.update({"llm_turns": len(traj.assistant), "prompt_tokens": usage["prompt"], "cached_tokens": usage["cached"], "output_tokens": usage["output"]})
+    rec.update({"llm_turns": len(traj.assistant) + len(traj.buyer_usage), "prompt_tokens": usage["prompt"], "cached_tokens": usage["cached"], "output_tokens": usage["output"]})
+    # 回合：对外的动作（商店动作和对用户说的话）；分工模式下导购和买手内部的调用不算，单独记调用次数
+    rec.update({"protocol_turns": traj.turns_used, "roles": traj.roles, "buyer_llm_calls": len(traj.buyer_usage)})
     # 任务状态层维护两张表时调用小模型的用量（agent 自己的调用不含这部分）
     state = Counter()
     for r in load_jsonl(task_dir / "state_log.jsonl"):
@@ -169,6 +171,9 @@ def evaluate_task(task_dir: Path, gold: dict, products: dict, conflicts: set, us
     for k in ("acceptable", "acceptable_core", "acceptable_lenient", "hard_violated", "hard_unknown", "violated_types"):
         rec[k] = out[k]
     rec["acceptable_alternative"] = rec["acceptable_core"] and not bought_gold
+    # 下单前用户有没有点头（论文多轮设置）
+    if traj.protocol == "paper":
+        rec["consent"] = consent(traj)
 
     # 2. 过程正确性：购买前核验 + 自述核对
     ver = verification(traj, rubric, out["results"])
@@ -293,6 +298,13 @@ def summarize(recs: list) -> str:
     L.append(f"  有购买 {pct(sum(r['purchased'] for r in valid), n)}；结束方式 {dict(Counter(r['termination'] for r in valid))}")
     vt = Counter(t for r in valid if r["purchased"] for t in r["violated_types"])
     L.append(f"  购买中被违反的 hard 约束类型       {dict(vt.most_common())}")
+    consented = [r for r in valid if r.get("consent")]
+    if consented:
+        att = Counter(r["consent"]["attitude"] for r in consented)
+        names = {"agree": "明确同意", "none": "没表态（还在补充需求或提问）", "refuse": "刚说完不买", "noask": "没问过用户"}
+        L.append(f"  下单前用户的最后一句话（{len(consented)} 次下单）：" + "，".join(f"{names[k]} {att.get(k, 0)}" for k in names))
+        agreed_right = sum(1 for r in consented if r["strict_success"] and r["consent"]["attitude"] == "agree")
+        L.append(f"  用户点头后买对（严格成功，且下单前用户最后一句话明确同意） {pct(agreed_right, n)}")
 
     L.append("【2 过程正确性】")
     sc = Counter(r["success_class"] for r in succ)
@@ -365,6 +377,9 @@ def summarize(recs: list) -> str:
     steps = sum(total.values())
     wasted = total["invalid"] + total["search_repeat"] + total["open_repeat"] + total["view_subpage"]
     L.append(f"  平均环境步数 {mean(r['env_steps'] for r in valid):.1f}，平均 LLM 回合 {mean(r['llm_turns'] for r in valid):.1f}，平均耗时 {mean(r['seconds'] for r in valid):.1f}s")
+    if any(r.get("roles") for r in valid):
+        L.append(f"  分工模式：平均用掉的回合（商店动作和对用户说的话） {mean(r['protocol_turns'] for r in valid):.1f}；"
+                 f"LLM 调用里导购 {mean(r['llm_turns'] - r['buyer_llm_calls'] for r in valid):.1f} 次、买手 {mean(r['buyer_llm_calls'] for r in valid):.1f} 次")
     L.append(f"  浪费的步数 {pct(wasted, steps)}（无效动作 {total['invalid']}、重复搜索 {total['search_repeat']}、重复打开 {total['open_repeat']}、查看无内容的详情子页 {total['view_subpage']}）")
     L.append(f"  平均 prompt token {mean(r['prompt_tokens'] for r in valid):.0f}（缓存命中 {mean(r['cached_tokens'] for r in valid):.0f}，"
              f"没命中 {mean(r['prompt_tokens'] - r['cached_tokens'] for r in valid):.0f}），平均输出 token {mean(r['output_tokens'] for r in valid):.0f}")

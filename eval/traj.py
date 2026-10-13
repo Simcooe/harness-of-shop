@@ -34,7 +34,7 @@ class Trajectory:
         done_path = task_dir / "done.json"
         self.done = json.loads(done_path.read_text(encoding="utf-8")) if done_path.exists() else {}
 
-        self.assistant = []  # 每个元素对应一个 LLM 回合（从 1 开始编号）
+        self.assistant = []  # 每个元素对应一个 LLM 回合（从 1 开始编号）；分工模式下是导购的调用
         for f in sorted((task_dir / "session").glob("*.jsonl")):
             for row in load_jsonl(f):
                 msg = row.get("message") or {}
@@ -49,6 +49,13 @@ class Trajectory:
                             "stop": msg.get("stopReason"),
                         }
                     )
+        # 分工模式（第四版）：买手每次找货一个会话，只记用量
+        self.buyer_usage = []
+        for f in sorted((task_dir / "buyer_sessions").glob("*.jsonl")):
+            for row in load_jsonl(f):
+                msg = row.get("message") or {}
+                if row.get("type") == "message" and msg.get("role") == "assistant":
+                    self.buyer_usage.append(msg.get("usage") or {})
 
     @property
     def purchase(self) -> dict:
@@ -85,6 +92,18 @@ class Trajectory:
             if proto:
                 return proto
         return "ours" if self.multiturn else "single"
+
+    @property
+    def roles(self) -> bool:
+        """分工模式（第四版：前台导购 + 后台买手）。这时日志里的回合是对外的动作，不等于导购的 LLM 调用次数。"""
+        config = self.dir.parent / "run_config.json"
+        return config.exists() and bool(json.loads(config.read_text(encoding="utf-8")).get("roles"))
+
+    @property
+    def turns_used(self) -> int:
+        """用掉的回合数：环境步骤、提问和 harness 事件里记的最大回合号。"""
+        turns = [int(r.get("turn") or 0) for r in self.steps + self.asks + self.harness]
+        return max(turns, default=0) if self.roles else max(turns + [len(self.assistant)], default=0)
 
     @property
     def multiturn(self) -> bool:

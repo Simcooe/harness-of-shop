@@ -30,7 +30,7 @@ MIN_REFERENCE_RUNS = 3
 SEARCHABLE = {"title", "attributes", "category", "shop"}
 # 搜索结果每一行显示的字段（标题、价格、属性），其余要打开商品才看得到
 IN_RESULTS = {"title", "attributes", "price"}
-HARD_CLOSE = {"closing_hard", "state_close_hard"}
+HARD_CLOSE = {"closing_hard", "state_close_hard", "roles_close_hard"}
 ACT_TURNS = 3  # 用户说出条件后，搜索、打开、下单至少要这么多回合；离"必须下单"不到这么多回合才说的，算说得太晚
 SUBPAGE_CHASE = 6  # 看一件商品的三个详情子页是 3 次，看两件以上还在看才算追查
 
@@ -261,7 +261,7 @@ def diagnose(traj, rubric: dict, gold: dict, rec: dict, products: dict) -> dict:
                 "explanation": f"S{fe.get('step')} 想打开正确商品或选正确规格，但动作在当时的页面上无效，被环境忽略。"}
 
     if not traj.purchased:
-        why = ("环境步数用完" if len(traj.steps) >= 35 else "回合用完" if len(traj.assistant) >= 40 else "agent 自己停了")
+        why = ("环境步数用完" if len(traj.steps) >= 35 else "回合用完" if traj.turns_used >= 40 else "agent 自己停了")
         seen = gold_sightings(traj, gold_asin)
         where = f"正确商品在 S{seen[0]['step']}（第 {seen[0]['turn']} 回合）{seen[0]['where']}过" if seen else "正确商品没出现过"
         return {**out, "cause": "没买成", "explanation": f"到最后都没有下单（{why}）；{where}。"}
