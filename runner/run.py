@@ -7,6 +7,8 @@ agent 侧只拿到需求原文；gold、画像等字段不进入 pi 进程。每
 论文多轮模式（--paper-openings）：照 ShopSimulator 官方 multi_eval 的规则。agent 拿到的是买家的开场白
 （scripts/make_paper_openings.py 冻结），买家知道完整需求和标准答案的规格选项，需求没问全时拒绝购买；
 提问不限次数，但和商店动作一起计入 40 个回合的上限。
+任务状态层（--state）：在插件之后加载 pi-shop/task_state.ts，维护需求表和商品表并按表提问、核对、收尾；
+--state-window K 只给模型最近 K 步原文（0 表示保留全部历史）。
 """
 import argparse
 import json
@@ -26,6 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PRIVATE_RESET_KEYS = {"goal_options", "user_persona", "reason_key", "_trace_target"}
 DEFAULT_PLUGIN = ROOT / "pi-shop" / "plugin.ts"
 ADAPTER_PATH = ROOT / "pi-shop" / "adapter.ts"
+STATE_PATH = ROOT / "pi-shop" / "task_state.ts"
 NEUTRAL_CWD = ROOT / "runs" / ".cwd"
 SHOPPER_PROMPT = ROOT / "prompts" / "shopper.md"
 
@@ -153,6 +156,8 @@ def run_task(task_id: int, args, run_dir: Path, base_env: dict, system_prompt: s
         ]
         if args.plugin != "off":
             cmd += ["-e", str(args.plugin_file)]
+        if args.state != "off":
+            cmd += ["-e", str(STATE_PATH)]
         cmd += [
             "--no-skills", "--no-prompt-templates", "--no-context-files",
             "--system-prompt", system_prompt,
@@ -172,6 +177,8 @@ def run_task(task_id: int, args, run_dir: Path, base_env: dict, system_prompt: s
             SHOP_ASK="1" if args.ask else "0",
             SHOP_SHOPPER_FILE=str(shopper_file) if args.ask else "",
             SHOP_MAX_QUESTIONS=str(args.max_questions),
+            SHOP_STATE="" if args.state == "off" else args.state,
+            SHOP_STATE_WINDOW=str(args.state_window),
         )
         with open(task_dir / "events.jsonl", "w") as out, open(task_dir / "stderr.log", "w") as err:
             try:
@@ -206,6 +213,8 @@ def main() -> None:
     parser.add_argument("--model", default="yowant/deepseek-v4-flash")
     parser.add_argument("--plugin", default="off", help="off、all，或逗号分隔的组件名（见插件文件头部说明）")
     parser.add_argument("--plugin-file", type=Path, default=DEFAULT_PLUGIN, help="插件文件；旧版组件在 pi-shop/plugin_v0.ts")
+    parser.add_argument("--state", default="off", help="任务状态层（pi-shop/task_state.ts）：off、all，或逗号分隔的组件名；在插件之后加载")
+    parser.add_argument("--state-window", type=int, default=6, help="任务状态层开启时只给模型最近几步原文；0 表示保留全部历史")
     parser.add_argument("--multiturn", default="", help="多轮数据（data/multiturn/<split>.jsonl）：agent 拿到模糊需求")
     parser.add_argument("--paper-openings", default="", help="论文多轮模式：买家开场白（data/multiturn_paper/<split>_openings.jsonl），自动开启 ask")
     parser.add_argument("--ask", action="store_true", help="提供 ask_shopper 工具（模拟买家回答）")
@@ -262,6 +271,8 @@ def main() -> None:
         "model": args.model,
         "plugin": args.plugin,
         "plugin_file": str(args.plugin_file.relative_to(ROOT)) if args.plugin != "off" else None,
+        "state": args.state,
+        "state_window": args.state_window if args.state != "off" else None,
         "protocol": "paper" if paper else ("ours" if args.multiturn else "single"),
         "multiturn": args.multiturn or None,
         "paper_openings": args.paper_openings or None,
@@ -275,7 +286,7 @@ def main() -> None:
         "task_source": args.task_ids or args.multiturn or args.paper_openings or args.tasks,
     }
     (run_dir / "run_config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n")
-    log(f"run={args.run_name} tasks={len(task_ids)} plugin={args.plugin} protocol={config['protocol']} ask={args.ask} "
+    log(f"run={args.run_name} tasks={len(task_ids)} plugin={args.plugin} state={args.state} protocol={config['protocol']} ask={args.ask} "
         f"model={args.model} workers={args.workers}")
 
     results = []
