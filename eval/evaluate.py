@@ -20,6 +20,7 @@ from asking import analyze as analyze_asking, load_multiturn, paper_multiturn  #
 from checker import load_products, load_rubric  # noqa: E402
 from judge import DIMENSIONS, judge  # noqa: E402
 from process import claims, first_error, interventions, outcome, verification  # noqa: E402
+from state_check import analyze as analyze_state  # noqa: E402
 from traj import Trajectory, load_jsonl, norm, options_match  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -141,6 +142,17 @@ def evaluate_task(task_dir: Path, gold: dict, products: dict, conflicts: set, us
         usage["cached"] += u.get("cacheRead", 0)
         usage["output"] += u.get("output", 0)
     rec.update({"llm_turns": len(traj.assistant), "prompt_tokens": usage["prompt"], "cached_tokens": usage["cached"], "output_tokens": usage["output"]})
+    # 任务状态层维护两张表时调用小模型的用量（agent 自己的调用不含这部分）
+    state = Counter()
+    for r in load_jsonl(task_dir / "state_log.jsonl"):
+        u = r.get("usage") or {}
+        if not u:
+            continue
+        state["calls"] += 1
+        state["prompt"] += u.get("prompt_tokens", 0)
+        state["cached"] += u.get("prompt_cache_hit_tokens", (u.get("prompt_tokens_details") or {}).get("cached_tokens", 0))
+        state["output"] += u.get("completion_tokens", 0)
+    rec.update({"state_calls": state["calls"], "state_prompt_tokens": state["prompt"], "state_cached_tokens": state["cached"], "state_output_tokens": state["output"]})
     last_text = traj.assistant[-1]["text"] if traj.assistant else ""
     rec["false_completion_claim_regex"] = not traj.purchased and bool(CLAIM_RE.search(last_text))
     rec["failure_stage"] = failure_stage(rec)
@@ -188,6 +200,11 @@ def evaluate_task(task_dir: Path, gold: dict, products: dict, conflicts: set, us
         rec["asking"]["stated"] = mt["stated"]
     elif traj.multiturn and traj.task_id in multiturn:
         rec["asking"] = analyze_asking(traj, rubric, multiturn[traj.task_id], out["results"], rec["acceptable_core"])
+
+    # 8. 任务状态层的需求表准不准
+    state_table = analyze_state(traj, rubric)
+    if state_table:
+        rec["state_table"] = state_table
 
     # 4. 过程质量（LLM 评审）与校准
     if use_judge:
@@ -324,10 +341,23 @@ def summarize(recs: list) -> str:
     wasted = total["invalid"] + total["search_repeat"] + total["open_repeat"] + total["view_subpage"]
     L.append(f"  平均环境步数 {mean(r['env_steps'] for r in valid):.1f}，平均 LLM 回合 {mean(r['llm_turns'] for r in valid):.1f}，平均耗时 {mean(r['seconds'] for r in valid):.1f}s")
     L.append(f"  浪费的步数 {pct(wasted, steps)}（无效动作 {total['invalid']}、重复搜索 {total['search_repeat']}、重复打开 {total['open_repeat']}、查看无内容的详情子页 {total['view_subpage']}）")
-    L.append(f"  平均 prompt token {mean(r['prompt_tokens'] for r in valid):.0f}（缓存命中 {mean(r['cached_tokens'] for r in valid):.0f}），平均输出 token {mean(r['output_tokens'] for r in valid):.0f}")
+    L.append(f"  平均 prompt token {mean(r['prompt_tokens'] for r in valid):.0f}（缓存命中 {mean(r['cached_tokens'] for r in valid):.0f}，"
+             f"没命中 {mean(r['prompt_tokens'] - r['cached_tokens'] for r in valid):.0f}），平均输出 token {mean(r['output_tokens'] for r in valid):.0f}")
+    if any(r.get("state_calls") for r in valid):
+        L.append(f"  维护任务状态（小模型）：平均每题调用 {mean(r['state_calls'] for r in valid):.1f} 次，prompt token {mean(r['state_prompt_tokens'] for r in valid):.0f}"
+                 f"（缓存命中 {mean(r['state_cached_tokens'] for r in valid):.0f}），输出 token {mean(r['state_output_tokens'] for r in valid):.0f}")
     asked = [r for r in valid if r.get("asking")]
     if asked:
         L += summarize_asking(asked)
+    tabled = [r for r in valid if r.get("state_table")]
+    if tabled:
+        said = sum(len(r["state_table"]["said"]) for r in tabled)
+        kept = sum(len(r["state_table"]["said_in_table"]) for r in tabled)
+        rows = sum(r["state_table"]["n_rows"] for r in tabled)
+        L.append("【8 任务状态：需求表准不准（每题最后一版）】")
+        L.append(f"  用户说出口的约束进了需求表 {pct(kept, said)}；平均每题 {rows / len(tabled):.1f} 行")
+        L.append(f"  表里的行对得上需求原文的约束 {pct(sum(r['state_table']['rows_matched'] for r in tabled), rows)}，"
+                 f"记错的 {pct(sum(r['state_table']['rows_wrong'] for r in tabled), rows)}（其余是用户随口说的、约束清单里没有的）")
     return "\n".join(L)
 
 

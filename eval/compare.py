@@ -90,6 +90,15 @@ def main() -> None:
         va = sum(base[i][key] for i in ids) / n
         vb = sum(exp[i][key] for i in ids) / n
         print(f"  {label:<20}{va:8.1f} {vb:8.1f}")
+    derived = [
+        ("平均提问次数", lambda r: (r.get("asking") or {}).get("n_questions", 0)),
+        ("没命中缓存的 prompt", lambda r: r["prompt_tokens"] - r["cached_tokens"]),
+        ("维护状态 token", lambda r: r.get("state_prompt_tokens", 0) + r.get("state_output_tokens", 0)),
+    ]
+    for label, fn in derived:
+        va = sum(fn(base[i]) for i in ids) / n
+        vb = sum(fn(exp[i]) for i in ids) / n
+        print(f"  {label:<20}{va:8.1f} {vb:8.1f}")
 
     def invalid_share(rows):
         total = Counter()
