@@ -2,7 +2,7 @@
 """过程评测：读一次运行的日志，输出 6 个面板（结果、过程正确性、失败诊断、过程质量、harness 干预、效率与成本）；
 多轮运行另加第 7 个面板（提问）。
 
-用法：python3 eval/evaluate.py runs/<run> [--judge] [--workers 8]
+用法：python3 eval/evaluate.py runs/<run> [--judge] [--diagnose] [--workers 8]
 
 只读日志、冻结的需求约束（data/rubrics/）和离线 gold（data/private/gold.jsonl），不调用环境，不用环境奖励。
 LLM 调用（约束核对、自述抽取、过程评审）都有缓存，重复运行不会重复请求。
@@ -18,9 +18,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from asking import analyze as analyze_asking, load_multiturn, paper_multiturn  # noqa: E402
 from checker import load_products, load_rubric  # noqa: E402
+from diagnose import diagnose  # noqa: E402
 from judge import DIMENSIONS, judge  # noqa: E402
-from process import claims, first_error, interventions, outcome, verification  # noqa: E402
-from state_check import analyze as analyze_state  # noqa: E402
+from process import buy_blocks, claims, first_error, interventions, outcome, verification  # noqa: E402
+from state_check import analyze as analyze_state, card_specs  # noqa: E402
 from traj import Trajectory, load_jsonl, norm, options_match  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -93,7 +94,7 @@ def failure_stage(rec: dict):
     return "options_at_purchase"
 
 
-def evaluate_task(task_dir: Path, gold: dict, products: dict, conflicts: set, use_judge: bool, multiturn: dict) -> dict:
+def evaluate_task(task_dir: Path, gold: dict, products: dict, conflicts: set, use_judge: bool, multiturn: dict, use_diagnose: bool = False) -> dict:
     traj = Trajectory(task_dir)
     g = gold[traj.task_id]
     gold_asin = str(g["asin"])
@@ -190,9 +191,13 @@ def evaluate_task(task_dir: Path, gold: dict, products: dict, conflicts: set, us
         rec["first_error"] = first_error(traj, g, cl["false_purchase_claim"])
     else:
         rec["first_error"] = None
+    # 失败原因：规则只说得出错在哪一步，这里让评审模型读轨迹判断为什么错
+    if use_diagnose and not rec["strict_success"]:
+        rec["diagnosis"] = diagnose(traj, rubric, g, rec, products)
 
-    # 5. harness 干预
+    # 5. harness 干预；拦下的购买放行的话会不会严格成功
     rec["interventions"] = interventions(traj)
+    rec["buy_blocks"] = buy_blocks(traj, g)
 
     # 7. 多轮提问
     if traj.protocol == "paper":
@@ -206,6 +211,9 @@ def evaluate_task(task_dir: Path, gold: dict, products: dict, conflicts: set, us
     state_table = analyze_state(traj, rubric)
     if state_table:
         rec["state_table"] = state_table
+    specs = card_specs(traj, g)
+    if specs:
+        rec["state_specs"] = specs
 
     # 4. 过程质量（LLM 评审）与校准
     if use_judge:
@@ -305,6 +313,10 @@ def summarize(recs: list) -> str:
     L.append(f"  没有严格成功 {sum(1 for r in valid if r['first_error'])} 题，首错类型 {dict(fe.most_common())}")
     bad = Counter(STAGE_NAMES.get(r["first_error"]["type"], r["first_error"]["type"]) for r in valid if r["first_error"] and not r["acceptable_core"])
     L.append(f"    其中买的东西不可接受的 {sum(bad.values())} 题，首错类型 {dict(bad.most_common())}")
+    diagnosed = [r for r in valid if r.get("diagnosis")]
+    if diagnosed:
+        causes = Counter(r["diagnosis"]["cause"] for r in diagnosed)
+        L.append(f"  失败原因（{len(diagnosed)} 题；日志能定的由规则判，其余由评审模型读轨迹判断）：{dict(causes.most_common())}")
     L.append(f"  漏斗：gold 被搜到 {pct(sum(r['retrieved_at'] is not None for r in valid), n)} → 被打开 {pct(sum(r['opened_at'] is not None for r in valid), n)}"
              f" → 规格全对 {pct(sum(r['options_correct_at'] is not None for r in valid), n)} → 买下 {pct(len(succ), n)}")
 
@@ -335,6 +347,14 @@ def summarize(recs: list) -> str:
             L.append(f"  {kind:<14} {a['count']} 次，涉及 {a['tasks']} 题{extra}")
     else:
         L.append("  无（插件未加载）")
+    blocked = [r for r in valid if r.get("buy_blocks")]
+    if blocked:
+        right = [r for r in blocked if any(b["was_correct"] for b in r["buy_blocks"])]
+        wrong = [r for r in blocked if not any(b["was_correct"] for b in r["buy_blocks"])]
+        n_right = sum(b["was_correct"] for r in blocked for b in r["buy_blocks"])
+        L.append(f"  拦下购买 {sum(len(r['buy_blocks']) for r in blocked)} 次（{len(blocked)} 题），其中放行就会严格成功的 {n_right} 次")
+        L.append(f"    拦下过正确购买的 {len(right)} 题：最后仍严格成功 {sum(r['strict_success'] for r in right)}，因此没买成 {sum(not r['strict_success'] for r in right)}")
+        L.append(f"    只拦下过错误购买的 {len(wrong)} 题：最后改成严格成功 {sum(r['strict_success'] for r in wrong)}")
 
     L.append("【6 效率与成本】")
     total = Counter()
@@ -359,6 +379,9 @@ def summarize(recs: list) -> str:
         rows = sum(r["state_table"]["n_rows"] for r in tabled)
         L.append("【8 任务状态：需求表准不准（每题最后一版）】")
         L.append(f"  用户说出口的约束进了需求表 {pct(kept, said)}；平均每题 {rows / len(tabled):.1f} 行")
+        specs = [s for r in valid for s in r.get("state_specs") or []]
+        if specs:
+            L.append(f"  商品表里正确商品的规格，标的“用户要”和正确规格一致 {pct(sum(s['correct'] for s in specs), len(specs))}")
         L.append(f"  表里的行对得上需求原文的约束 {pct(sum(r['state_table']['rows_matched'] for r in tabled), rows)}，"
                  f"记错的 {pct(sum(r['state_table']['rows_wrong'] for r in tabled), rows)}（其余是用户随口说的、约束清单里没有的）")
     return "\n".join(L)
@@ -369,13 +392,14 @@ def main() -> None:
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--judge", action="store_true", help="同时运行 LLM 过程评审（V4 Pro）")
+    parser.add_argument("--diagnose", action="store_true", help="没有严格成功的题，让评审模型（V4 Pro）判断失败的根本原因")
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
 
     gold, products, conflicts, multiturn = load_gold(), load_products(), load_gold_conflicts(), load_multiturn()
     task_dirs = sorted(p for p in args.run_dir.glob("task_*") if p.is_dir())
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        recs = list(pool.map(lambda d: evaluate_task(d, gold, products, conflicts, args.judge, multiturn), task_dirs))
+        recs = list(pool.map(lambda d: evaluate_task(d, gold, products, conflicts, args.judge, multiturn, args.diagnose), task_dirs))
     out = args.out or args.run_dir / "eval"
     out.mkdir(parents=True, exist_ok=True)
     with (out / "tasks.jsonl").open("w", encoding="utf-8") as f:

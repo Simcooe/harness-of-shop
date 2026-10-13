@@ -4,12 +4,13 @@
 也就是 agent 实际看到的那一版（原话核对没通过的条目已经被丢掉）。
 """
 import json
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llm import chat_json  # noqa: E402
-from traj import load_jsonl  # noqa: E402
+from traj import gold_value_matches, load_jsonl  # noqa: E402
 
 MODEL = "deepseek-v4-flash"
 
@@ -31,6 +32,25 @@ def requirement_table(card: str) -> list:
                 break
             lines.append(line.strip())
     return lines
+
+
+SPEC_WANTED = re.compile(r"规格「(.+?)」：用户要“(.+?)”")
+
+
+def card_specs(traj, gold: dict):
+    """状态卡的商品表里，正确商品每个规格项标的“用户要”是哪个值（取最后一次标出的），和正确规格对不对得上。"""
+    row = re.compile(r"\n  \d+\. \[" + re.escape(str(gold["asin"])) + r"\]")
+    wanted = {}
+    for c in load_jsonl(traj.dir / "state_cards.jsonl"):
+        card = c.get("card") or ""
+        m = row.search(card)
+        if m:
+            block = re.split(r"\n  \d+\. \[", card[m.end():], maxsplit=1)[0]
+            wanted = dict(SPEC_WANTED.findall(block)) or wanted
+    if not wanted:
+        return None
+    return [{"axis": axis, "value": value, "correct": any(gold_value_matches(g, value) for g in gold["options"])}
+            for axis, value in wanted.items()]
 
 
 def analyze(traj, rubric: dict):

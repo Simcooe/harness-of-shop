@@ -230,3 +230,13 @@ def interventions(traj: Trajectory) -> dict:
     if "finish_hint" in stats:
         stats["finish_hint"]["bought_after"] = traj.purchased
     return stats
+
+
+BUY_BLOCKS = {"state_verify_block": "下单前对表核对", "confirm_block": "购买前确认"}
+
+
+def buy_blocks(traj: Trajectory, gold: dict) -> list:
+    """harness 拦下的每次购买：被拦时选的是不是正确商品和全对的规格，也就是这次购买放行的话会不会严格成功。"""
+    return [{"turn": e.get("turn"), "type": e.get("type"),
+             "was_correct": str(e.get("asin")) == str(gold["asin"]) and options_match(e.get("selected"), gold["options"])}
+            for e in traj.harness if e.get("type") in BUY_BLOCKS]

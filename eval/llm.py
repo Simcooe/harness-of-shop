@@ -85,7 +85,7 @@ def chat_text(model: str, messages: list, max_tokens: int = 200, timeout: int = 
             content = (body["choices"][0]["message"]["content"] or "").strip()
             _write_cache(cache, {"model": model, "content": content, "usage": body.get("usage")})
             return content
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, KeyError) as exc:
+        except (HTTPError, URLError, OSError, json.JSONDecodeError, KeyError) as exc:
             last_error = exc
             time.sleep(2 * (attempt + 1))
     raise RuntimeError(f"{model} 调用失败: {last_error}")
@@ -115,7 +115,8 @@ def chat_json(model: str, system: str, user: str, max_tokens: int = 4096, timeou
             parsed = _parse_json(content)
             _write_cache(cache, {"model": model, "content": content, "parsed": parsed, "usage": body.get("usage")})
             return parsed
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, KeyError) as exc:
+        # OSError 包括超时和连接被对方断开（RemoteDisconnected）
+        except (HTTPError, URLError, OSError, json.JSONDecodeError, KeyError) as exc:
             last_error = exc
             time.sleep(2 * (attempt + 1))
     raise RuntimeError(f"{model} 调用失败: {last_error}")

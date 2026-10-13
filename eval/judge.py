@@ -129,6 +129,15 @@ def render_trajectory(traj: Trajectory) -> str:
             out.append(f"[系统提醒] 还剩 {e.get('left')} 个回合，请尽快下单")
         elif e["kind"] == "harness" and e.get("type") == "closing_hard":
             out.append("[系统提醒] 现在必须下单" + ("（用户已结束对话）" if e.get("bye") else f"（只剩 {e.get('left')} 个回合）"))
+        # 第三版（任务状态层）的干预；之前的运行没有这些事件
+        elif e["kind"] == "harness" and e.get("type") == "state_verify_block":
+            out.append(f"[系统拦截，未执行] buy_now：下单前对表核对，{_short('；'.join(e.get('issues') or []), 200)}")
+        elif e["kind"] == "harness" and e.get("type") == "state_ask":
+            out.append(f"[系统提醒] 提示把规格选项列给用户挑：{'、'.join(e.get('axes') or [])}")
+        elif e["kind"] == "harness" and e.get("type") == "state_close_soft":
+            out.append(f"[系统提醒] 还剩 {e.get('left')} 个回合，请尽快下单")
+        elif e["kind"] == "harness" and e.get("type") == "state_close_hard":
+            out.append("[系统提醒] 现在必须下单" + ("（用户已结束对话）" if e.get("bye") else f"（只剩 {e.get('left')} 个回合）"))
     if not traj.purchased:
         out.append("\n（轨迹结束，没有出现“购买完成”）")
     return "\n".join(out)
