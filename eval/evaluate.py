@@ -191,7 +191,7 @@ def evaluate_task(task_dir: Path, gold: dict, products: dict, conflicts: set, us
         rec["first_error"] = first_error(traj, g, cl["false_purchase_claim"])
     else:
         rec["first_error"] = None
-    # 失败原因：规则只说得出错在哪一步，这里让评审模型读轨迹判断为什么错
+    # 失败原因：首错定位只说得出错在哪一步，这里判断为什么错
     if use_diagnose and not rec["strict_success"]:
         rec["diagnosis"] = diagnose(traj, rubric, g, rec, products)
 
@@ -316,7 +316,9 @@ def summarize(recs: list) -> str:
     diagnosed = [r for r in valid if r.get("diagnosis")]
     if diagnosed:
         causes = Counter(r["diagnosis"]["cause"] for r in diagnosed)
-        L.append(f"  失败原因（{len(diagnosed)} 题；日志能定的由规则判，其余由评审模型读轨迹判断）：{dict(causes.most_common())}")
+        tags = Counter(t for r in diagnosed for t in r["diagnosis"].get("tags") or [])
+        L.append(f"  失败原因（{len(diagnosed)} 题，按核对过的事实由规则判定）：{dict(causes.most_common())}")
+        L.append(f"    附加标签：{dict(tags.most_common())}")
     L.append(f"  漏斗：gold 被搜到 {pct(sum(r['retrieved_at'] is not None for r in valid), n)} → 被打开 {pct(sum(r['opened_at'] is not None for r in valid), n)}"
              f" → 规格全对 {pct(sum(r['options_correct_at'] is not None for r in valid), n)} → 买下 {pct(len(succ), n)}")
 
@@ -392,7 +394,7 @@ def main() -> None:
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--judge", action="store_true", help="同时运行 LLM 过程评审（V4 Pro）")
-    parser.add_argument("--diagnose", action="store_true", help="没有严格成功的题，让评审模型（V4 Pro）判断失败的根本原因")
+    parser.add_argument("--diagnose", action="store_true", help="没有严格成功的题，判断失败的根本原因（规则判定，用户说过什么、规格能不能推出来交给模型核对）")
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
 
