@@ -8,6 +8,9 @@
  *   我们自己的多轮设置：买家只知道完整需求（不知道 gold），提问不消耗环境步数，每题最多 SHOP_MAX_QUESTIONS 次。
  *   论文多轮设置（SHOP_MAX_QUESTIONS=0）：买家文件里预置了开场对话，提问不限次数，但和商店动作一起计入回合上限
  *   （SHOP_MAX_LLM_TURNS）；照官方做法，每次返回都附上当前回合数。
+ * - 分工模式（SHOP_ROLES=1，第四版 harness，见 pi-shop/roles.ts）：主 agent 是导购，不注册商店工具；买手和下单动作
+ *   通过 "shop:api" 拿到的 act() 操作商店。回合只算对外的动作：每个商店动作（含被合法性校验拦下的）、每句对用户说的话；
+ *   导购和买手内部的调用不算回合，另外统计调用次数和 token。
  */
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -23,11 +26,13 @@ const ASK_MODE = process.env.SHOP_ASK === "1";
 const MAX_QUESTIONS = Number(process.env.SHOP_MAX_QUESTIONS ?? "3");
 const PAPER_MODE = ASK_MODE && MAX_QUESTIONS <= 0;
 const PROXY_URL = (process.env.MODEL_PROXY_BASE_URL ?? "").replace(/\/+$/, "");
-
+const ROLES_MODE = process.env.SHOP_ROLES === "1";
+// 分工模式下导购自己的模型调用不算回合，这里给它一个上限，防止一直在内部打转
+const MAX_ROLE_LLM_CALLS = 100;
 
 type Params = Record<string, string>;
 
-interface ShopTool {
+export interface ShopTool {
 	name: string;
 	label: string;
 	description: string;
@@ -38,7 +43,7 @@ interface ShopTool {
 const NO_PARAMS = Type.Object({});
 
 // 环境的商品页不渲染 Attributes 按钮（属性已直接显示在页面上），所以不提供 view_attributes。
-const SHOP_TOOLS: ShopTool[] = [
+export const SHOP_TOOLS: ShopTool[] = [
 	{
 		name: "search_products",
 		label: "搜索商品",
@@ -111,8 +116,12 @@ const SHOP_TOOLS: ShopTool[] = [
 	},
 ];
 
-// 提问也算本回合的一个动作：先看到回答，再决定下一步。
-const SHOP_TOOL_NAMES = new Set([...SHOP_TOOLS.map((t) => t.name), ...(ASK_MODE ? ["ask_shopper"] : [])]);
+// 提问也算本回合的一个动作：先看到回答，再决定下一步。分工模式下导购的工具同样每个回合只放行一个。
+const ROLE_TOOL_NAMES = ["find_products", "show_candidates", "buy"];
+const SHOP_TOOL_NAMES = new Set([
+	...(ROLES_MODE ? ROLE_TOOL_NAMES : SHOP_TOOLS.map((t) => t.name)),
+	...(ASK_MODE ? ["ask_shopper"] : []),
+]);
 
 interface QA {
 	question: string;
@@ -196,7 +205,7 @@ function contentToText(content: unknown): string {
 	return text.length > CONTENT_CHAR_LIMIT ? `${text.slice(0, CONTENT_CHAR_LIMIT)}\n（内容过长，已截断）` : text;
 }
 
-function renderPage(state: any): string {
+export function renderPage(state: any): string {
 	if (!state || typeof state !== "object") return "（页面为空）";
 	const out: string[] = [];
 	const pageType = String(state.page_type ?? "unknown");
@@ -247,8 +256,29 @@ function renderPage(state: any): string {
 	return out.join("\n");
 }
 
+export interface ActResult {
+	kind: "ok" | "done" | "error";
+	text: string;
+	step: number;
+	message?: string;
+	/** 分工模式：回合用完或任务已经结束，这个动作没有执行 */
+	refused?: boolean;
+}
+
+/** 分工模式下给 roles.ts 用的商店接口（通过 pi.events 的 "shop:api" 拿到）。 */
+export interface ShopApi {
+	maxTurns: number;
+	turn: () => number;
+	steps: () => number;
+	isDone: () => boolean;
+	withTurn: (text: string) => string;
+	act: (name: string, params: Params, who: string) => Promise<ActResult>;
+	countBlocked: () => number;
+}
+
 export default function (pi: ExtensionAPI) {
 	let turn = 0;
+	let llmCalls = 0;
 	let shopCallsThisTurn = 0;
 	let envSteps = 0;
 	let done = false;
@@ -256,7 +286,9 @@ export default function (pi: ExtensionAPI) {
 	const withTurn = (text: string) => (PAPER_MODE ? `${text}\n轮次: ${turn}` : text);
 
 	pi.on("turn_start", async () => {
-		turn += 1;
+		llmCalls += 1;
+		// 分工模式下回合只算对外的动作，在商店动作和提问时累加
+		if (!ROLES_MODE) turn += 1;
 		shopCallsThisTurn = 0;
 	});
 
@@ -267,8 +299,8 @@ export default function (pi: ExtensionAPI) {
 			log("harness_events.jsonl", { type: "after_done", ...base });
 			return { block: true, reason: "任务已经结束。", terminate: true };
 		}
-		if (turn > MAX_LLM_TURNS) {
-			log("harness_events.jsonl", { type: "turn_cap", ...base });
+		if (ROLES_MODE ? turn >= MAX_LLM_TURNS || llmCalls > MAX_ROLE_LLM_CALLS : turn > MAX_LLM_TURNS) {
+			log("harness_events.jsonl", { type: "turn_cap", ...base, ...(ROLES_MODE ? { llm_calls: llmCalls } : {}) });
 			return { block: true, reason: "已达到回合上限，任务终止。", terminate: true };
 		}
 		shopCallsThisTurn += 1;
@@ -284,52 +316,79 @@ export default function (pi: ExtensionAPI) {
 		return undefined;
 	});
 
-	for (const tool of SHOP_TOOLS) {
-		pi.registerTool({
-			name: tool.name,
-			label: tool.label,
-			description: tool.description,
-			parameters: tool.parameters,
-			async execute(_toolCallId: string, params: Params) {
-				const action = tool.toAction(params ?? {});
-				let result: Record<string, any>;
-				try {
-					result = await envInteract(action);
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					log("harness_events.jsonl", { type: "env_error", turn, tool: tool.name, args: params, action, message });
-					done = true;
-					return {
-						content: [{ type: "text" as const, text: "商店环境异常，任务中止。" }],
-						details: { envError: message },
-						terminate: true,
-					};
-				}
-				envSteps += 1;
-				log("env_steps.jsonl", { step: envSteps, turn, tool: tool.name, args: params, action, result });
-				if (!result.done) pi.events.emit("shop:state", { step: envSteps, turn, state: result.observation_state });
+	async function act(tool: ShopTool, params: Params, who?: string): Promise<ActResult> {
+		const action = tool.toAction(params ?? {});
+		const by = who ? { who } : {};
+		let result: Record<string, any>;
+		try {
+			result = await envInteract(action);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			log("harness_events.jsonl", { type: "env_error", turn, tool: tool.name, args: params, action, message, ...by });
+			done = true;
+			return { kind: "error", text: "商店环境异常，任务中止。", step: envSteps, message };
+		}
+		envSteps += 1;
+		log("env_steps.jsonl", { step: envSteps, turn, tool: tool.name, args: params, action, result, ...by });
+		if (!result.done) pi.events.emit("shop:state", { step: envSteps, turn, state: result.observation_state });
 
-				if (result.done) {
-					done = true;
-					pi.events.emit("shop:done", { step: envSteps, turn });
-					if (RUN_DIR) {
-						writeFileSync(
-							join(RUN_DIR, "terminal.json"),
-							`${JSON.stringify({ step: envSteps, turn, tool: tool.name, action, result }, null, 2)}\n`,
-						);
-					}
-					return {
-						content: [{ type: "text" as const, text: "【任务已结束】" }],
-						details: { step: envSteps, done: true },
-						terminate: true,
-					};
-				}
-				return {
-					content: [{ type: "text" as const, text: withTurn(renderPage(result.observation_state)) }],
-					details: { step: envSteps },
-				};
+		if (result.done) {
+			done = true;
+			pi.events.emit("shop:done", { step: envSteps, turn });
+			if (RUN_DIR) {
+				writeFileSync(
+					join(RUN_DIR, "terminal.json"),
+					`${JSON.stringify({ step: envSteps, turn, tool: tool.name, action, result }, null, 2)}\n`,
+				);
+			}
+			return { kind: "done", text: "【任务已结束】", step: envSteps };
+		}
+		return { kind: "ok", text: withTurn(renderPage(result.observation_state)), step: envSteps };
+	}
+
+	if (ROLES_MODE) {
+		const api: ShopApi = {
+			maxTurns: MAX_LLM_TURNS,
+			turn: () => turn,
+			steps: () => envSteps,
+			isDone: () => done,
+			withTurn,
+			async act(name: string, params: Params, who: string) {
+				const tool = SHOP_TOOLS.find((t) => t.name === name);
+				if (!tool) throw new Error(`未知的商店动作：${name}`);
+				if (done) return { kind: "done", text: "任务已经结束。", step: envSteps, refused: true };
+				if (turn >= MAX_LLM_TURNS) return { kind: "ok", text: "回合已经用完，不能再操作商店。", step: envSteps, refused: true };
+				turn += 1;
+				return act(tool, params, who);
 			},
+			// 被合法性校验拦下的商店动作也算一个回合：和 v2 一样，模型做了这个决定，只是没交给环境
+			countBlocked() {
+				turn += 1;
+				return turn;
+			},
+		};
+		pi.events.on("shop:api", (register: unknown) => {
+			if (typeof register === "function") register(api);
 		});
+	} else {
+		for (const tool of SHOP_TOOLS) {
+			pi.registerTool({
+				name: tool.name,
+				label: tool.label,
+				description: tool.description,
+				parameters: tool.parameters,
+				async execute(_toolCallId: string, params: Params) {
+					const r = await act(tool, params);
+					if (r.kind === "error") {
+						return { content: [{ type: "text" as const, text: r.text }], details: { envError: r.message }, terminate: true };
+					}
+					if (r.kind === "done") {
+						return { content: [{ type: "text" as const, text: r.text }], details: { step: r.step, done: true }, terminate: true };
+					}
+					return { content: [{ type: "text" as const, text: r.text }], details: { step: r.step } };
+				},
+			});
+		}
 	}
 
 	const shopper = loadShopper();
@@ -338,6 +397,7 @@ export default function (pi: ExtensionAPI) {
 	const history: QA[] = [];
 
 	async function askShopper(question: string, via: "tool" | "text"): Promise<string> {
+		if (ROLES_MODE) turn += 1;
 		let answer = "（用户暂时没有回应）";
 		let usage: unknown = null;
 		let error: string | undefined;

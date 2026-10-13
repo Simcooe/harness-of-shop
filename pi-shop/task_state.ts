@@ -807,4 +807,22 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 
-export { evidenceFrom, parseBudget, quotedFrom };
+// 第四版（pi-shop/roles.ts）复用需求表的整理方法和这些小函数
+export {
+	ATTITUDES,
+	BASIC_SLOTS,
+	chatJson,
+	evidenceFrom,
+	inBudget,
+	looseKey,
+	parseBudget,
+	priceNumbers,
+	priceText,
+	quotedFrom,
+	quoteValues,
+	REQ_SYSTEM,
+	short,
+	SLOTS,
+	squash,
+	STATUSES,
+};

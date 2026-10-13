@@ -9,6 +9,8 @@ agent 侧只拿到需求原文；gold、画像等字段不进入 pi 进程。每
 提问不限次数，但和商店动作一起计入 40 个回合的上限。
 任务状态层（--state）：在插件之后加载 pi-shop/task_state.ts，维护需求表和商品表并按表提问、核对、收尾；
 --state-window K 只给模型最近 K 步原文（0 表示保留全部历史）。
+分工模式（--roles，第四版）：主 agent 是导购（prompts/roles_sales.md），不能直接操作商店；买手由 pi-shop/roles.ts
+在同一个进程里另开 pi 会话（prompts/roles_buyer.md），会话记录在 task_<id>/buyer_sessions/。只用于论文多轮设置，不加载插件和任务状态层。
 """
 import argparse
 import json
@@ -29,8 +31,12 @@ PRIVATE_RESET_KEYS = {"goal_options", "user_persona", "reason_key", "_trace_targ
 DEFAULT_PLUGIN = ROOT / "pi-shop" / "plugin.ts"
 ADAPTER_PATH = ROOT / "pi-shop" / "adapter.ts"
 STATE_PATH = ROOT / "pi-shop" / "task_state.ts"
+ROLES_PATH = ROOT / "pi-shop" / "roles.ts"
 NEUTRAL_CWD = ROOT / "runs" / ".cwd"
 SHOPPER_PROMPT = ROOT / "prompts" / "shopper.md"
+BASE_PROMPT = ROOT / "prompts" / "base.md"
+SALES_PROMPT = ROOT / "prompts" / "roles_sales.md"
+BUYER_PROMPT = ROOT / "prompts" / "roles_buyer.md"
 
 print_lock = threading.Lock()
 
@@ -158,6 +164,8 @@ def run_task(task_id: int, args, run_dir: Path, base_env: dict, system_prompt: s
             cmd += ["-e", str(args.plugin_file)]
         if args.state != "off":
             cmd += ["-e", str(STATE_PATH)]
+        if args.roles:
+            cmd += ["-e", str(ROLES_PATH)]
         cmd += [
             "--no-skills", "--no-prompt-templates", "--no-context-files",
             "--system-prompt", system_prompt,
@@ -179,6 +187,9 @@ def run_task(task_id: int, args, run_dir: Path, base_env: dict, system_prompt: s
             SHOP_MAX_QUESTIONS=str(args.max_questions),
             SHOP_STATE="" if args.state == "off" else args.state,
             SHOP_STATE_WINDOW=str(args.state_window),
+            SHOP_ROLES="1" if args.roles else "0",
+            SHOP_BUYER_PROMPT_FILE=str(BUYER_PROMPT) if args.roles else "",
+            SHOP_BUYER_MODEL=args.model,
         )
         with open(task_dir / "events.jsonl", "w") as out, open(task_dir / "stderr.log", "w") as err:
             try:
@@ -215,6 +226,7 @@ def main() -> None:
     parser.add_argument("--plugin-file", type=Path, default=DEFAULT_PLUGIN, help="插件文件；旧版组件在 pi-shop/plugin_v0.ts")
     parser.add_argument("--state", default="off", help="任务状态层（pi-shop/task_state.ts）：off、all，或逗号分隔的组件名；在插件之后加载")
     parser.add_argument("--state-window", type=int, default=6, help="任务状态层开启时只给模型最近几步原文；0 表示保留全部历史")
+    parser.add_argument("--roles", action="store_true", help="第四版：前台导购 + 后台买手（pi-shop/roles.ts），只用于论文多轮设置")
     parser.add_argument("--multiturn", default="", help="多轮数据（data/multiturn/<split>.jsonl）：agent 拿到模糊需求")
     parser.add_argument("--paper-openings", default="", help="论文多轮模式：买家开场白（data/multiturn_paper/<split>_openings.jsonl），自动开启 ask")
     parser.add_argument("--ask", action="store_true", help="提供 ask_shopper 工具（模拟买家回答）")
@@ -227,13 +239,17 @@ def main() -> None:
     parser.add_argument("--timeout", type=int, default=900, help="单题 pi 进程超时（秒）")
     parser.add_argument("--max-llm-turns", type=int, default=None, help="回合上限（提问也算一个回合）；默认：论文模式 40，否则 60")
     parser.add_argument("--max-steps", type=int, default=35, help="须与环境配置 termination.max_steps 一致，插件用它算剩余步数")
-    parser.add_argument("--system-prompt-file", default=str(ROOT / "prompts" / "base.md"))
+    parser.add_argument("--system-prompt-file", default=None, help="默认：分工模式用 prompts/roles_sales.md，否则 prompts/base.md")
     parser.add_argument("--pi-bin", default="pi")
     args = parser.parse_args()
 
     paper = bool(args.paper_openings)
     if paper and args.multiturn:
         sys.exit("--paper-openings 和 --multiturn 不能同时使用")
+    if args.roles and (not paper or args.plugin != "off" or args.state != "off"):
+        sys.exit("--roles 只用于论文多轮设置（--paper-openings），而且不和 --plugin、--state 一起用")
+    if args.system_prompt_file is None:
+        args.system_prompt_file = str(SALES_PROMPT if args.roles else BASE_PROMPT)
     if paper:
         args.ask = True
     if args.max_questions is None:
@@ -273,6 +289,8 @@ def main() -> None:
         "plugin_file": str(args.plugin_file.relative_to(ROOT)) if args.plugin != "off" else None,
         "state": args.state,
         "state_window": args.state_window if args.state != "off" else None,
+        "roles": args.roles,
+        "buyer_prompt": BUYER_PROMPT.read_text().strip() if args.roles else None,
         "protocol": "paper" if paper else ("ours" if args.multiturn else "single"),
         "multiturn": args.multiturn or None,
         "paper_openings": args.paper_openings or None,
@@ -286,7 +304,7 @@ def main() -> None:
         "task_source": args.task_ids or args.multiturn or args.paper_openings or args.tasks,
     }
     (run_dir / "run_config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n")
-    log(f"run={args.run_name} tasks={len(task_ids)} plugin={args.plugin} state={args.state} protocol={config['protocol']} ask={args.ask} "
+    log(f"run={args.run_name} tasks={len(task_ids)} plugin={args.plugin} state={args.state} roles={args.roles} protocol={config['protocol']} ask={args.ask} "
         f"model={args.model} workers={args.workers}")
 
     results = []

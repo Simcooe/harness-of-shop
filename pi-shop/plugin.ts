@@ -14,6 +14,8 @@
  *                   规则写在提示词里它到时候也常常不照做，所以在需要的时候把规则和执行它要用的信息送到眼前
  *   choice          规格选择题（多轮，"all" 不含）：提问提示里把还没定的规格选项原样列出，请 agent 让用户直接挑
  *                   （论文设置里用户知道自己要哪个规格）
+ *   spec_fill       规格补点（"all" 不含）：只有一个选项的规格项还没点就 buy_now 时拦一次，提示先点上。真实商店里
+ *                   这种规格会自动选上，这个环境要手动点，否则规格不全、不算买对
  * 多轮组件只在适配层开启了 ask_shopper（SHOP_ASK=1）时生效。
  * 旧版组件（状态台账、进展监控、购买前审计、需求契约、步数提醒）保留在 plugin_v0.ts。
  */
@@ -21,7 +23,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const COMPONENTS = ["guard", "nudge", "ask_hint", "confirm_gate", "dialogue_ledger", "closing", "choice"];
+const COMPONENTS = ["guard", "nudge", "ask_hint", "confirm_gate", "dialogue_ledger", "closing", "choice", "spec_fill"];
 const ALL = ["guard", "nudge", "ask_hint", "confirm_gate"];
 const requested = (process.env.SHOP_PLUGIN || "all").split(",").map((s) => s.trim()).filter(Boolean);
 const unknownComponents = requested.filter((c) => c !== "all" && !COMPONENTS.includes(c));
@@ -190,6 +192,76 @@ function quoteValues(values: string[], n = 12): string {
 
 type Verdict = { block?: string; rewrite?: { field: string; value: string } };
 
+/** 合法性校验：动作在当前页面（cur）上是否有效。第四版的买手也用它（pi-shop/roles.ts）。 */
+export function guardCheck(cur: any, tool: string, input: Record<string, string>): Verdict {
+	const page = cur.page_type ?? "search_home";
+	const clickables: string[] = Array.isArray(cur.actions) ? cur.actions.map(String) : [];
+	const has = (text: string) => clickables.some((c) => envKey(c) === envKey(text));
+	const repair = (text: string, pool: string[]) => {
+		const matches = pool.filter((c) => looseKey(c) === looseKey(text));
+		return matches.length === 1 ? matches[0] : null;
+	};
+	const where = pageLabel(cur);
+	const backToProduct = "请先 prev_page 回到商品详情页。";
+
+	switch (tool) {
+		case "search_products":
+			return String(input.query ?? "").trim() ? {} : { block: "搜索词不能为空。" };
+		case "open_product": {
+			if (page === "product_detail")
+				return { block: `当前在${where}，只能在搜索结果页打开商品。请先 prev_page 回到搜索结果，或直接 search_products 重新搜索。` };
+			if (page === "information_subpage") return { block: `当前在${where}，只能在搜索结果页打开商品。${backToProduct}` };
+			if (page !== "search_results") return { block: `当前在${where}，请先搜索。` };
+			if (has(input.asin)) return {};
+			const asins = (cur.products ?? []).map((p: any) => String(p.asin));
+			const fixed = repair(input.asin, asins);
+			if (fixed) return { rewrite: { field: "asin", value: fixed } };
+			return {
+				block: `商品 ${input.asin} 不在当前这页搜索结果里（${where}）。本页可打开的商品ID：${asins.join("、")}。之前搜索结果里的商品需要重新搜到才能打开。`,
+			};
+		}
+		case "select_option": {
+			if (page === "information_subpage") return { block: `当前在${where}，不能选规格。${backToProduct}` };
+			if (page !== "product_detail") return { block: `当前在${where}，只能在商品详情页选择规格。` };
+			const values: string[] = Object.values(cur.available_options ?? {}).flat().map(String);
+			if (!values.length) return { block: "这个商品没有可选规格，可以直接购买。" };
+			if (has(input.value) && values.some((v) => envKey(v) === envKey(input.value))) return {};
+			const fixed = repair(input.value, values);
+			if (fixed && has(fixed)) return { rewrite: { field: "value", value: fixed } };
+			return {
+				block: `“${input.value}”不是这个商品的可选规格值。可选规格：${JSON.stringify(cur.available_options)}。请原样填写其中一个值。`,
+			};
+		}
+		case "view_description":
+		case "view_features":
+		case "view_reviews": {
+			const button = { view_description: "description", view_features: "features", view_reviews: "reviews" }[tool]!;
+			if (page === "information_subpage") return { block: `当前已在${where}。要看其他详情，${backToProduct}` };
+			if (page !== "product_detail") return { block: `当前在${where}，只能在商品详情页查看商品详情。` };
+			return has(button) ? {} : { block: "这个商品没有该详情页。" };
+		}
+		case "next_page":
+			if (page !== "search_results") return { block: `当前在${where}，只有搜索结果页可以翻页。` };
+			return has("next >") ? {} : { block: "已经是最后一页搜索结果。" };
+		case "prev_page":
+			if (has("< prev")) return {};
+			return {
+				block:
+					page === "search_results"
+						? "已经是搜索结果第一页。要换关键词请直接调用 search_products。"
+						: `当前在${where}，没有上一页。`,
+			};
+		case "back_to_search":
+			return has("back to search") ? {} : { block: "当前已在搜索首页，可以直接调用 search_products。" };
+		case "buy_now":
+			if (page === "information_subpage") return { block: `当前在${where}，不能购买。${backToProduct}` };
+			if (page !== "product_detail" || !has("buy now")) return { block: `当前在${where}，只能在商品详情页购买。` };
+			return {};
+		default:
+			return {};
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	let cur: any = parseInitialState();
 	let initialQuery = "";
@@ -206,6 +278,7 @@ export default function (pi: ExtensionAPI) {
 	const dialogue: { question: string; answer: string }[] = [];
 	const hinted = new Set<string>();
 	const gated = new Set<string>();
+	const specFilled = new Set<string>();
 
 	const asksLeft = () => (UNLIMITED_ASKS ? Infinity : Math.max(0, MAX_QUESTIONS - dialogue.length));
 	const asksLeftNote = () => (UNLIMITED_ASKS ? "" : `（还能问 ${asksLeft()} 次）`);
@@ -269,75 +342,6 @@ export default function (pi: ExtensionAPI) {
 		const note = closingNote();
 		if (note && Array.isArray(data?.notes)) data.notes.push(note);
 	});
-
-	function guard(tool: string, input: Record<string, string>): Verdict {
-		const page = cur.page_type ?? "search_home";
-		const clickables: string[] = Array.isArray(cur.actions) ? cur.actions.map(String) : [];
-		const has = (text: string) => clickables.some((c) => envKey(c) === envKey(text));
-		const repair = (text: string, pool: string[]) => {
-			const matches = pool.filter((c) => looseKey(c) === looseKey(text));
-			return matches.length === 1 ? matches[0] : null;
-		};
-		const where = pageLabel(cur);
-		const backToProduct = "请先 prev_page 回到商品详情页。";
-
-		switch (tool) {
-			case "search_products":
-				return String(input.query ?? "").trim() ? {} : { block: "搜索词不能为空。" };
-			case "open_product": {
-				if (page === "product_detail")
-					return { block: `当前在${where}，只能在搜索结果页打开商品。请先 prev_page 回到搜索结果，或直接 search_products 重新搜索。` };
-				if (page === "information_subpage") return { block: `当前在${where}，只能在搜索结果页打开商品。${backToProduct}` };
-				if (page !== "search_results") return { block: `当前在${where}，请先搜索。` };
-				if (has(input.asin)) return {};
-				const asins = (cur.products ?? []).map((p: any) => String(p.asin));
-				const fixed = repair(input.asin, asins);
-				if (fixed) return { rewrite: { field: "asin", value: fixed } };
-				return {
-					block: `商品 ${input.asin} 不在当前这页搜索结果里（${where}）。本页可打开的商品ID：${asins.join("、")}。之前搜索结果里的商品需要重新搜到才能打开。`,
-				};
-			}
-			case "select_option": {
-				if (page === "information_subpage") return { block: `当前在${where}，不能选规格。${backToProduct}` };
-				if (page !== "product_detail") return { block: `当前在${where}，只能在商品详情页选择规格。` };
-				const values: string[] = Object.values(cur.available_options ?? {}).flat().map(String);
-				if (!values.length) return { block: "这个商品没有可选规格，可以直接购买。" };
-				if (has(input.value) && values.some((v) => envKey(v) === envKey(input.value))) return {};
-				const fixed = repair(input.value, values);
-				if (fixed && has(fixed)) return { rewrite: { field: "value", value: fixed } };
-				return {
-					block: `“${input.value}”不是这个商品的可选规格值。可选规格：${JSON.stringify(cur.available_options)}。请原样填写其中一个值。`,
-				};
-			}
-			case "view_description":
-			case "view_features":
-			case "view_reviews": {
-				const button = { view_description: "description", view_features: "features", view_reviews: "reviews" }[tool]!;
-				if (page === "information_subpage") return { block: `当前已在${where}。要看其他详情，${backToProduct}` };
-				if (page !== "product_detail") return { block: `当前在${where}，只能在商品详情页查看商品详情。` };
-				return has(button) ? {} : { block: "这个商品没有该详情页。" };
-			}
-			case "next_page":
-				if (page !== "search_results") return { block: `当前在${where}，只有搜索结果页可以翻页。` };
-				return has("next >") ? {} : { block: "已经是最后一页搜索结果。" };
-			case "prev_page":
-				if (has("< prev")) return {};
-				return {
-					block:
-						page === "search_results"
-							? "已经是搜索结果第一页。要换关键词请直接调用 search_products。"
-							: `当前在${where}，没有上一页。`,
-				};
-			case "back_to_search":
-				return has("back to search") ? {} : { block: "当前已在搜索首页，可以直接调用 search_products。" };
-			case "buy_now":
-				if (page === "information_subpage") return { block: `当前在${where}，不能购买。${backToProduct}` };
-				if (page !== "product_detail" || !has("buy now")) return { block: `当前在${where}，只能在商品详情页购买。` };
-				return {};
-			default:
-				return {};
-		}
-	}
 
 	/** 购买前确认：有规格项没选，或已选的值不是用户的话唯一确定的那个、也没问过用户，就拦一次。 */
 	function confirmGate(): { reason: string; issues: string[] } | null {
@@ -403,7 +407,7 @@ export default function (pi: ExtensionAPI) {
 		if (!ENV_TOOLS.has(event.toolName)) return undefined;
 		const input = event.input as Record<string, string>;
 		if (on("guard")) {
-			const verdict = guard(event.toolName, input);
+			const verdict = guardCheck(cur, event.toolName, input);
 			if (verdict.block) {
 				log({ type: "guard_block", turn: turns, tool: event.toolName, args: input, page: cur.page_type, reason: verdict.block });
 				return { block: true, reason: verdict.block };
@@ -411,6 +415,19 @@ export default function (pi: ExtensionAPI) {
 			if (verdict.rewrite) {
 				log({ type: "guard_rewrite", turn: turns, tool: event.toolName, from: input[verdict.rewrite.field], to: verdict.rewrite.value });
 				input[verdict.rewrite.field] = verdict.rewrite.value;
+			}
+		}
+		if (on("spec_fill") && event.toolName === "buy_now" && cur.page_type === "product_detail") {
+			const asin = String(cur.product?.asin ?? "");
+			const selected = (cur.selected_options ?? {}) as Record<string, string>;
+			const missing = Object.entries((cur.available_options ?? {}) as Record<string, string[]>)
+				.filter(([axis, values]) => values.length === 1 && selected[axis] === undefined)
+				.map(([axis, values]) => ({ axis, value: String(values[0]) }));
+			if (missing.length && !specFilled.has(asin)) {
+				specFilled.add(asin);
+				log({ type: "spec_fill_block", turn: turns, asin, missing });
+				const listed = missing.map((m) => `「${m.axis}」只有“${m.value}”一个选项`).join("；");
+				return { block: true, reason: `【规格没点】${listed}，还没点：先用 select_option 点上，再调用 buy_now。` };
 			}
 		}
 		if (ASK_MODE && on("confirm_gate") && event.toolName === "buy_now" && cur.page_type === "product_detail") {
