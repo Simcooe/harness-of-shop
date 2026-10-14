@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llm import chat_json  # noqa: E402
 from traj import Trajectory, load_jsonl, text_of  # noqa: E402
 
-JUDGE_MODEL = "deepseek-v4-pro"
+JUDGE_MODEL = "deepseek-flash"
 DIMENSIONS = ["search_strategy", "candidate_utilization", "evidence_verification", "decision_quality", "termination_efficiency"]
 
 SYSTEM = """你是购物 agent 的轨迹评审。阅读用户需求、冻结的需求约束（rubric）和 agent 的完整执行轨迹，评价执行过程的质量，输出 JSON。

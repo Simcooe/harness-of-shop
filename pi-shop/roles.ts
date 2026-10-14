@@ -17,7 +17,10 @@
  *   系统替它把这段话转给用户，对话接着往下走。
  *   下单由系统按候选单记下的位置回到商品页、点好规格（只有一个选项的规格自动点上）再购买。
  * - 连着两次找货候选单第 1 件都没变、它也没有和用户要求冲突的地方时，不再派买手去找（剩下的只是页面没写的信息）。
- * 只用 agent 能看到的信息（对话和页面），不读 gold 和模拟买家的配置。
+ * - 画像分级（--profile-tiers，画像设置下的改进）：整理需求单时一起看用户画像。最近的搜索词里和这次商品有关的写成要求、
+ *   标明来自画像，排候选、推荐、派买手都照它对；平时的偏好（品牌、颜色等）只在几件商品差不多时参考，不当要求，买手也不只拿它去搜。
+ *   和用户说的话冲突时听用户的；每条都要能在画像原文里找到。
+ * 只用 agent 能看到的信息（对话、页面和画像设置下的用户画像），不读 gold 和模拟买家的配置。
  */
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -56,6 +59,9 @@ import {
 const RUN_DIR = process.env.SHOP_RUN_DIR;
 const MAX_STEPS = Number(process.env.SHOP_MAX_STEPS ?? "35");
 const BUYER_PROMPT_FILE = process.env.SHOP_BUYER_PROMPT_FILE ?? "";
+// 画像分级（画像设置下的改进，--profile-tiers）：画像里和这次商品有关的内容按来源写进需求单
+const PROFILE_TIERS = process.env.SHOP_PROFILE_TIERS === "1";
+const PERSONA_FILE = process.env.SHOP_PERSONA_FILE ?? "";
 // 每次找货买手最多做几个商店动作；派买手时给对话和下单留的回合
 const BUYER_STEPS = 8;
 const RESERVE = 6;
@@ -80,6 +86,24 @@ const SHEET_SYSTEM = `你是导购的助手，负责把买手看过的商品按�
   - 规格类需求：可选规格里有用户要的选项就算符合；所有选项都不满足才算不符合；规格还没打开看过的商品判“页面没写”。
 - options：只给打开看过规格的商品填，每个有两个以上选项的规格项一项。wanted 列出按需求应该选的选项，照抄选项原文：需求只对得上一个选项就只列这一个；几个都对得上就都列；用户没提过这方面就列出全部选项。`;
 
+/**
+ * 画像分级：整理完用户的需求表之后，再从画像里挑这次用得上的信息。最近的搜索词很可能就是这次要买的，当要求用；
+ * 平时的偏好只做参考。用户说过具体要求的方面以用户为准；用户说无所谓、没想好的方面按画像补。
+ */
+const PROFILE_SYSTEM = `你负责从用户的个人资料里挑出这次购物用得上的信息。个人资料是平台记录的，不是用户在对话里说的话，分两部分：最近的搜索词，平时的偏好（人口属性、兴趣偏好、用户标签）。另外给你用户在对话里已经说过的要求（需求表）。
+
+输出一个 JSON 对象：{"cues": [{"source": "画像搜索", "slot": "其他", "aspect": "款式", "value": "平底", "quote": "可搭配汉服的平底女式绣花鞋"}]}
+
+- 画像搜索：最近的搜索词里和这次要买的商品有关的具体要求（功能、材质、款式、适用对象、使用场景、规格、数量、服务等），一条只写一个方面。搜索词说的是别的商品就不要写。
+- 画像偏好：平时的偏好里和这次商品最相关的，最多 3 条（比如这一类商品的品牌、颜色、风格）。和这次商品无关的不要写。
+- 需求表里用户已经给了具体要求的方面：画像和用户说的不一样就不要写（以用户为准），一样的也不用重复写。用户说无所谓或者没想好的方面，画像里有就写。
+- slot 只能是：品类、品牌、型号款式、规格、预算、其他；aspect 两到四个字；value 尽量用资料里的说法；quote 从个人资料里逐字摘抄支持这一条的一小段。`;
+
+const SHEET_PREF_NOTE = `
+- 需求单后面附的“用户平时的偏好”不是需求：只在几件商品其他方面差不多时用来排先后，不用逐条判，也不要因为不符合偏好就把更符合需求单的商品排到后面。`;
+
+const MAX_PREF_CUES = 3;
+
 type Verdict = "符合" | "不符合" | "页面没写";
 
 interface Req {
@@ -89,6 +113,8 @@ interface Req {
 	value: string;
 	status: string;
 	quote: string;
+	/** 用户 / 画像搜索 / 画像偏好；不开画像分级时都是“用户” */
+	source: string;
 }
 
 interface Item {
@@ -144,6 +170,28 @@ function parseInitialState(): any {
 		// 用默认的搜索首页
 	}
 	return { page_type: "search_home", actions: ["search"] };
+}
+
+interface Profile {
+	/** 最近的行为：搜索词，以及其他有内容的“最近……”栏（官方数据里加购、收藏全是空的） */
+	recent: string[];
+	/** 平时的偏好：人口属性、兴趣偏好、用户标签，原样给小模型看 */
+	prefs: string;
+}
+
+function loadProfile(): Profile | null {
+	if (!PROFILE_TIERS || !PERSONA_FILE) return null;
+	const p = JSON.parse(readFileSync(PERSONA_FILE, "utf-8"));
+	const recent: string[] = [];
+	for (const [key, value] of Object.entries((p?.["行为特征"] ?? {}) as Record<string, unknown>)) {
+		if (!key.includes("最近") || !Array.isArray(value)) continue;
+		for (const v of value) {
+			const text = (typeof v === "string" ? v : JSON.stringify(v)).trim();
+			if (text) recent.push(key.includes("搜索") ? text : `${key.replace(/^最近\d+天/, "")}：${text}`);
+		}
+	}
+	const prefs = JSON.stringify({ 人口属性: p?.["人口属性"] ?? {}, 兴趣偏好: p?.["兴趣偏好"] ?? {}, 用户标签: p?.["用户标签"] ?? [] });
+	return { recent, prefs };
 }
 
 /** 买手会话不发现任何扩展、技能和上下文文件，只用给定的系统提示和工具。 */
@@ -215,6 +263,9 @@ export default function (pi: ExtensionAPI) {
 	// 导购最近一条消息里写的文字：和工具调用写在一起时不会转给用户，卡住时由系统替它转
 	let lastAssistantText = "";
 	let gateWarned = false;
+	const profile = loadProfile();
+	const recentText = profile ? profile.recent.join("\n") : "";
+	if (profile) logEvent({ type: "roles_profile", recent: profile.recent.length });
 
 	const turnsLeft = () => shop.maxTurns - shop.turn();
 	const stepsLeft = () => MAX_STEPS - shop.steps();
@@ -355,8 +406,14 @@ export default function (pi: ExtensionAPI) {
 				dropped.push(raw);
 				continue;
 			}
-			const row: Req = { id: "", slot, aspect, value: status === "无要求" ? "" : value, status, quote };
+			const row: Req = { id: "", slot, aspect, value: status === "无要求" ? "" : value, status, quote, source: "用户" };
 			const key = `${slot}|${aspect}|${row.value}`;
+			if (keys.has(key)) continue;
+			keys.add(key);
+			rows.push(row);
+		}
+		for (const row of await profileCues(rows)) {
+			const key = `${row.slot}|${row.aspect}|${row.value}`;
 			if (keys.has(key)) continue;
 			keys.add(key);
 			rows.push(row);
@@ -368,6 +425,31 @@ export default function (pi: ExtensionAPI) {
 		const valid = snapshot.length > 0 && ATTITUDES.includes(status) && quotedFrom(String(att.quote ?? ""), lastAnswer);
 		attitude = { status: valid ? status : "未表态", product: valid ? String(att.product ?? "").trim() : "", quote: valid ? String(att.quote) : "", n: snapshot.length };
 		if (dropped.length) log("state_log.jsonl", { kind: "requirements_dropped", turn: shop.turn(), dropped });
+	}
+
+	/** 画像分级：按用户已经说过的要求，从画像里挑这次用得上的条目；每条都要能在画像原文里找到。 */
+	async function profileCues(userRows: Req[]): Promise<Req[]> {
+		if (!profile) return [];
+		const table = userRows.length ? userRows.map((r) => `${r.aspect}：${reqValue(r)}`).join("\n") : "（还没有）";
+		const recent = profile.recent.length ? profile.recent.map((s) => `「${s}」`).join("") : "（没有）";
+		const input = `用户在对话里说过的要求（需求表）：\n${table}\n\n用户的个人资料：\n最近的搜索词：${recent}\n平时的偏好：${profile.prefs}`;
+		const out = await chatJson("profile", PROFILE_SYSTEM, input, 1500, shop.turn());
+		const found: Req[] = [];
+		const dropped: unknown[] = [];
+		for (const raw of Array.isArray(out?.cues) ? out.cues : []) {
+			const source = String(raw?.source ?? "");
+			const quote = String(raw?.quote ?? "").trim();
+			const value = String(raw?.value ?? "").trim();
+			const from = source === "画像搜索" ? recentText : source === "画像偏好" ? profile.prefs : "";
+			if (!from || !value || !quotedFrom(quote, from)) {
+				dropped.push(raw);
+				continue;
+			}
+			const slot = SLOTS.includes(String(raw?.slot)) ? String(raw.slot) : "其他";
+			found.push({ id: "", slot, aspect: short(String(raw?.aspect ?? "").trim() || slot, 8), value, status: "已确认", quote, source });
+		}
+		if (dropped.length) log("state_log.jsonl", { kind: "profile_dropped", turn: shop.turn(), dropped });
+		return [...found.filter((r) => r.source === "画像搜索"), ...found.filter((r) => r.source === "画像偏好").slice(0, MAX_PREF_CUES)];
 	}
 
 	function scheduleRequirements(): void {
@@ -407,15 +489,17 @@ export default function (pi: ExtensionAPI) {
 			lastSheet = [];
 			return lastSheet;
 		}
-		const confirmed = reqs.filter((r) => r.status === "已确认");
+		const confirmed = reqs.filter((r) => r.status === "已确认" && r.source !== "画像偏好");
 		const relaxed = reqs.filter((r) => r.status === "无要求");
-		const listing = confirmed.map((r) => `${r.id} ${r.aspect}：${r.value}`);
+		const prefs = reqs.filter((r) => r.status === "已确认" && r.source === "画像偏好");
+		const listing = confirmed.map((r) => `${r.id} ${r.aspect}：${r.value}${r.source === "画像搜索" ? "（来自用户最近的搜索）" : ""}`);
 		if (relaxed.length) listing.push(`（用户说无所谓的方面：${relaxed.map((r) => r.aspect).join("、")}）`);
+		const prefLine = prefs.length ? `\n\n用户平时的偏好（不是需求，只在几件商品其他方面差不多时参考）：${prefs.map((r) => `${r.aspect}：${r.value}`).join("；")}` : "";
 		const byAsin = new Map(items.map((i) => [i.asin, i]));
 		const input =
-			`用户的需求单：\n${listing.join("\n") || "（还没有确定的需求）"}\n\n` +
+			`用户的需求单：\n${listing.join("\n") || "（还没有确定的需求）"}${prefLine}\n\n` +
 			`看过的商品（共 ${items.length} 件）：\n${items.map((i) => `[${i.asin}] ${factsOf(i)}`).join("\n")}`;
-		const out = await chatJson("sheet", SHEET_SYSTEM, input, 2000, shop.turn());
+		const out = await chatJson("sheet", prefs.length ? SHEET_SYSTEM + SHEET_PREF_NOTE : SHEET_SYSTEM, input, 2000, shop.turn());
 		const picks: Pick[] = [];
 		const downgraded: unknown[] = [];
 		for (const raw of Array.isArray(out?.top) ? out.top : []) {
@@ -481,18 +565,25 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
+	/** 需求表一行的来源：用户原话，或者画像里的哪一部分。 */
+	function sourceNote(r: Req): string {
+		if (r.source === "画像搜索") return `画像：用户最近搜过「${short(r.quote, 40)}」（用户没亲口说过）`;
+		if (r.source === "画像偏好") return `画像：平时的偏好「${short(r.quote, 30)}」（只做参考，不是要求）`;
+		return `原话「${short(r.quote, 40)}」`;
+	}
+
 	/** 候选单的文字。需求表和商品行的格式和第三版的状态卡一致，评测器第 8 个面板可以直接读。 */
 	function sheetText(picks: Pick[]): string {
 		const L = [`【候选单】系统把看过的 ${pool.size} 件商品按需求单排了名（只认页面上写着的字）。`, "需求表："];
 		if (!reqs.length) L.push("  （还没有）");
-		for (const r of reqs) L.push(`  ${r.id} ${r.aspect}：${reqValue(r)}｜原话「${short(r.quote, 40)}」`);
+		for (const r of reqs) L.push(`  ${r.id} ${r.aspect}：${reqValue(r)}｜${sourceNote(r)}`);
 		const unknown = unknownSlots();
 		if (unknown.length) L.push(`  还不知道：${unknown.join("、")}`);
 		if (!picks.length) {
 			L.push("候选：（还没看过商品）");
 			return L.join("\n");
 		}
-		const confirmed = reqs.filter((r) => r.status === "已确认");
+		const confirmed = reqs.filter((r) => r.status === "已确认" && r.source !== "画像偏好");
 		L.push("候选（按符合程度排序）：");
 		picks.forEach((p, i) => {
 			const it = p.item;
@@ -577,11 +668,20 @@ export default function (pi: ExtensionAPI) {
 	// ---- 买手 ----
 
 	function buyerTask(request: string, budget: number): string {
-		const L = [`找货任务（导购交给你的）：${request}`, "", "用户的需求单（系统按用户原话整理）："];
+		const L = [`找货任务（导购交给你的）：${request}`, "", profile ? "用户的需求单（系统按用户原话和用户画像整理）：" : "用户的需求单（系统按用户原话整理）："];
 		if (!reqs.length) L.push("  （还没有）");
-		for (const r of reqs) L.push(`  ${r.id} ${r.aspect}：${reqValue(r)}`);
+		const tag = (r: Req) => (r.source === "画像搜索" ? "（来自用户最近的搜索）" : r.source === "画像偏好" ? "（用户平时的偏好，只做参考）" : "");
+		for (const r of reqs) L.push(`  ${r.id} ${r.aspect}：${reqValue(r)}${tag(r)}`);
 		const unknown = unknownSlots();
 		if (unknown.length) L.push(`  还不知道：${unknown.join("、")}`);
+		if (profile) {
+			// 用户自己最近搜过的词往往就是最准的搜索词
+			const used = profile.recent.filter((s) => reqs.some((r) => r.source === "画像搜索" && quotedFrom(r.quote, s)));
+			if (used.length) L.push(`用户最近在商城里搜过：${used.map((s) => `「${s}」`).join("")}（和这次要买的有关，可以直接拿来当搜索词）`);
+			if (reqs.some((r) => r.source === "画像偏好")) {
+				L.push("用户平时的偏好不是要求：不要只拿偏好里的品牌去搜，也不要因为不是这个牌子就放过更符合需求的商品。");
+			}
+		}
 		if (searches.size) L.push("", `已经搜过：${[...searches.entries()].map(([q, p]) => `「${q}」（看到第 ${p} 页）`).join("；")}`);
 		const recent = judgedPool().slice(0, 12);
 		if (recent.length) {
@@ -746,9 +846,10 @@ export default function (pi: ExtensionAPI) {
 		return atProduct(it.asin);
 	}
 
-	/** 系统替导购下单时，没定的规格项按需求单里对得上的选项选，都对不上就选第一个。 */
+	/** 系统替导购下单时，没定的规格项按需求单里对得上的选项选（画像偏好最后看），都对不上就选第一个。 */
 	function guessOption(axis: string, values: string[]): string {
-		for (const r of reqs.filter((x) => x.status === "已确认")) {
+		const confirmed = reqs.filter((x) => x.status === "已确认");
+		for (const r of [...confirmed.filter((x) => x.source !== "画像偏好"), ...confirmed.filter((x) => x.source === "画像偏好")]) {
 			const hit = matchOption({ [axis]: values }, r.value);
 			if (hit) return hit[1];
 		}

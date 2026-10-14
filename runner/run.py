@@ -13,6 +13,8 @@ agent 侧只拿到需求原文；gold、画像等字段不进入 pi 进程。每
 在同一个进程里另开 pi 会话（prompts/roles_buyer.md），会话记录在 task_<id>/buyer_sessions/。只用于论文多轮设置，不加载插件和任务状态层。
 画像设置（--persona，配合按 --persona 生成的开场白）：agent 的系统提示末尾附上用户画像（prompts/persona_agent.md），
 买家只知道简版需求和规格选项（runner/paper_protocol.py）。画像另存在 task_<id>/persona.json。
+画像分级（--profile-tiers，只和 --persona --roles 一起用）：第四版之上的改进，系统按来源把画像整理进需求单（pi-shop/roles.ts），
+导购的系统提示在画像段之前加上 prompts/roles_profile.md。
 """
 import argparse
 import json
@@ -49,6 +51,7 @@ SHOPPER_PROMPT = ROOT / "prompts" / "shopper.md"
 BASE_PROMPT = ROOT / "prompts" / "base.md"
 SALES_PROMPT = ROOT / "prompts" / "roles_sales.md"
 BUYER_PROMPT = ROOT / "prompts" / "roles_buyer.md"
+PROFILE_PROMPT = ROOT / "prompts" / "roles_profile.md"
 
 print_lock = threading.Lock()
 
@@ -159,7 +162,8 @@ def run_task(task_id: int, args, run_dir: Path, base_env: dict, system_prompt: s
             shopper_query = short_query(reset)
             if not opening.get("persona") or str(opening.get("shopper_query", "")).strip() != shopper_query:
                 raise RuntimeError("开场白不是按这道题的简版需求生成的")
-            task_prompt = f"{system_prompt}\n\n{persona_agent_block(profile)}"
+            profile_how = f"\n\n{PROFILE_PROMPT.read_text(encoding='utf-8').strip()}" if args.profile_tiers else ""
+            task_prompt = f"{system_prompt}{profile_how}\n\n{persona_agent_block(profile)}"
             (task_dir / "persona.json").write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n")
         public = {k: v for k, v in reset.items() if k not in PRIVATE_RESET_KEYS}
         public["query"] = query
@@ -215,6 +219,8 @@ def run_task(task_id: int, args, run_dir: Path, base_env: dict, system_prompt: s
             SHOP_ROLES="1" if args.roles else "0",
             SHOP_BUYER_PROMPT_FILE=str(BUYER_PROMPT) if args.roles else "",
             SHOP_BUYER_MODEL=args.model,
+            SHOP_PROFILE_TIERS="1" if args.profile_tiers else "0",
+            SHOP_PERSONA_FILE=str(task_dir / "persona.json") if args.profile_tiers else "",
         )
         with open(task_dir / "events.jsonl", "w") as out, open(task_dir / "stderr.log", "w") as err:
             try:
@@ -255,6 +261,7 @@ def main() -> None:
     parser.add_argument("--multiturn", default="", help="多轮数据（data/multiturn/<split>.jsonl）：agent 拿到模糊需求")
     parser.add_argument("--paper-openings", default="", help="论文多轮模式：买家开场白（data/multiturn_paper/<split>_openings.jsonl），自动开启 ask")
     parser.add_argument("--persona", action="store_true", help="画像设置：agent 拿到用户画像，买家只知道简版需求；开场白须按 --persona 生成")
+    parser.add_argument("--profile-tiers", action="store_true", help="画像分级：按来源把画像整理进第四版的需求单（需 --persona --roles）")
     parser.add_argument("--ask", action="store_true", help="提供 ask_shopper 工具（模拟买家回答）")
     parser.add_argument("--shopper-model", default="qwen3.7-plus")
     parser.add_argument("--shopper-prompt-file", type=Path, default=None, help="默认：论文模式用官方买家提示，否则 prompts/shopper.md")
@@ -276,6 +283,8 @@ def main() -> None:
         sys.exit("--roles 只用于论文多轮设置（--paper-openings），而且不和 --plugin、--state 一起用")
     if args.persona and not paper:
         sys.exit("--persona 只用于论文多轮设置（--paper-openings）")
+    if args.profile_tiers and not (args.persona and args.roles):
+        sys.exit("--profile-tiers 要和 --persona --roles 一起用")
     if args.system_prompt_file is None:
         args.system_prompt_file = str(SALES_PROMPT if args.roles else BASE_PROMPT)
     if paper:
@@ -329,6 +338,8 @@ def main() -> None:
         "persona": args.persona,
         "persona_agent_block": PERSONA_AGENT_BLOCK.read_text(encoding="utf-8").strip() if args.persona else None,
         "persona_shopper_rule": PERSONA_SHOPPER_RULE.read_text(encoding="utf-8").strip() if args.persona else None,
+        "profile_tiers": args.profile_tiers,
+        "profile_prompt": PROFILE_PROMPT.read_text(encoding="utf-8").strip() if args.profile_tiers else None,
         "system_prompt": system_prompt,
         "max_llm_turns": args.max_llm_turns,
         "n_tasks": len(task_ids),

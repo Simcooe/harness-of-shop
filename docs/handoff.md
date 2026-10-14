@@ -44,7 +44,7 @@
 - 用户同意只补跑测试集上卡死的 3 题（`runs/test_paper_v4_fix3`，标明是看过测试集后修复的）：3 题都买对了，转话没触发，卡死没再出现。正式成绩仍是 90% / 56%。
 - `docs/diagnosis_check.md`（失败原因诊断的抽查清单，附 Claude 的判断）还在等用户确认，没有提交。
 - 所有实验结束后提醒用户轮换模型代理的密钥。
-- **新方向：画像设置（"懂你的导购"，`docs/harness_design.md` 第十节）**。用户看了官方画像数据后同意：用户只知道简版需求（照论文），问到不知道的细节让它说没想好、不许编，测试集 200 道。评测已搭好（画像开发集 50、测试集 200，开场白、需求约束、答案自检都已冻结），测试集没跑过。开发集上第四版不改直接跑：严格成功 64%，同样 50 题用户知道完整需求时 74%（差距在噪声以内），新冒出来的错主要是"漏用画像"（用户只知道简版需求、很容易点头，导购没拿画像近期行为里的区分点去挑）和"被画像带偏"（拿画像里的品牌去搜）。开发集上发现模拟用户会把没想好的细节当成购买条件，规则补了一句后基本消失（第十节）。改进方案（画像分级）等用户确认。
+- **新方向：画像设置（"懂你的导购"，`docs/harness_design.md` 第十节）**。用户只知道简版需求（照论文），细节在用户画像里，agent 能看到画像；问到不知道的细节模拟用户说没想好、不编，也不当购买条件（开发集上发现后补的规则）。题目：画像开发集 50、测试集 200。第四版不改直接跑，新冒出来的错是"漏用画像"和"被画像里的牌子带偏"。改进"画像分级"（用户同意："那你做吧"）：画像里最近的搜索词当要求用、平时的偏好只做参考、和用户的话冲突听用户的，`--profile-tiers`。结果：开发集严格成功 64% → 82%，**测试集 66% → 81%**（36 好 7 差），用户点头后买对 61% → 72%，画像搜索词里的要求满足率 82% → 91%。测试集两组各跑一次，是用户同意的方案里的最后一步。
 
 ### 2.2 可能的下一步
 
@@ -81,9 +81,11 @@ pi-shop/task_state.ts  第三版：需求表 + 商品表（--state all），在�
 pi-shop/roles.ts       第四版：前台导购 + 后台买手（--roles），和分工模式的适配层（SHOP_ROLES=1）一起加载
                        - 导购的工具 find_products / show_candidates / buy；买手每次找货用 SDK 新开一个 pi 会话（buyer_sessions/）
                        - 通过 pi.events 的 "shop:api" 拿到适配层的商店接口；下单由系统按候选单回到商品页、点好规格再买
+                       - SHOP_PROFILE_TIERS=1 时开画像分级：profileCues 按来源把画像整理进需求单（读 SHOP_PERSONA_FILE）
 prompts/roles_sales.md 第四版导购的系统提示；prompts/roles_buyer.md 买手的系统提示
 prompts/persona_agent.md   画像设置：附在 agent 系统提示末尾的画像段（{persona} 换成这道题的画像）
 prompts/shopper_persona.md 画像设置：附在官方买家提示末尾的规则（只知道简版需求和规格；没想好的细节让 agent 挑、不编、不算购买条件）
+prompts/roles_profile.md   画像分级：导购怎么用画像（--profile-tiers 时加在画像段之前）
 prompts/base.md        基线系统提示（所有组共用，只有一句话）
 prompts/shopper.md     我们自己多轮设置的模拟买家提示（已冻结）
 runner/run.py          批量运行：reset → 写 reset_public.json → 启动干净的 pi 进程 → release → done.json
@@ -93,7 +95,8 @@ runner/run.py          批量运行：reset → 写 reset_public.json → 启动
                        买家回答最多 512 token）。run_config.json 里记 protocol = single / ours / paper。
                        已有 done.json 的题会跳过（中断后重跑同名即可续跑）。环境槽位满时 reset 会等待重试。
                        --state off|all|组件、--state-window K（第三版）；--roles（第四版，只能和 --paper-openings 一起用）。
-                       --persona（画像设置，只能和 --paper-openings 一起用，开场白须按 --persona 生成）。
+                       --persona（画像设置，只能和 --paper-openings 一起用，开场白须按 --persona 生成）；
+                       --profile-tiers（画像分级，要和 --persona --roles 一起用）。
 runner/paper_protocol.py   论文多轮规则：按官方 shopper.reset 拼买家系统提示（官方买家提示 + 完整需求 + 标准答案规格选项）；
                        画像设置下换成简版需求，并附上 prompts/shopper_persona.md
 scripts/export_tasks.py    导出 data/test_ids.json（作者 Final-200）、data/dev_ids.json、画像设置的 data/persona_{test,dev}_ids.json、
@@ -186,7 +189,7 @@ python3 scripts/make_paper_openings.py --persona --tasks data/persona_dev_ids.js
 python3 runner/run.py --run-name dev_pers_v4 --paper-openings data/multiturn_paper/persona_dev_openings.jsonl --persona --roles --workers 6
 ```
 
-评测照常跑 `eval/evaluate.py`，再跑画像专用的分析（约束的信息在哪里、买下的商品满足了多少；`--shopper` 是模拟用户质检）：
+画像分级再加 `--profile-tiers`（`runs/dev_pers_v5`）。评测照常跑 `eval/evaluate.py`，再跑画像专用的分析（约束的信息在哪里、买下的商品满足了多少、点头了但买错、拿画像里无关的牌子去搜、同款重复上架；`--shopper` 是模拟用户质检）：
 
 ```bash
 python3 eval/persona.py runs/dev_pers_v4
@@ -284,6 +287,14 @@ v2 + 规格补点（`--plugin all,closing,choice,spec_fill`，2026-10-14）：�
 - 原版 → 插件全开 +14（p = 0.002）；原版 → 论文提示词 +8.5（p = 0.06）；论文提示词 → 插件全开 +5.5（p = 0.27）。
 - v2 决策质量 0 分的 28 题里 27 题触发过"现在必须下单"（16 题其实买对了），评审理由都是"用户拒绝后仍下单"。
 
+### 画像设置（多轮 + 用户画像，`docs/harness_design.md` 第十节），每组一次，不带评审
+
+| 组 | 开发集 50 题严格成功 | 测试集 200 题严格成功 | 测试集用户点头后买对 |
+|---|---|---|---|
+| 第四版不改 | 64% | 66% | 61% |
+| 画像分级（`--profile-tiers`） | 82% | 81% | 72% |
+| 对照：同样的开发集题目，用户知道完整需求、没有画像（第四版） | 74% | 没跑 | — |
+
 ### runs 目录索引
 
 | 运行 | 内容 | 是否带评审 |
@@ -310,9 +321,13 @@ v2 + 规格补点（`--plugin all,closing,choice,spec_fill`，2026-10-14）：�
 | dev_pers_v4_fullneed | 对照：同样 50 题，用户知道完整需求、没有画像 | 否 |
 | dev_pers_v4_rule1 | 画像开发集，第一版用户规则（用户会把没想好的细节当成购买条件，已弃用，只作记录） | 否 |
 | dev_pers_v4_smoke | 画像设置冒烟测试（2 题） | 否 |
+| dev_pers_v5 / dev_pers_v5_smoke | 画像开发集，画像分级：50 题 / 冒烟测试 5 题 | 否 |
+| test_pers_v4 / test_pers_v5 | 画像测试集 200 题：第四版不改 / 画像分级（用户同意的方案里最后一步） | 否 |
 | smoke* | 冒烟测试，可忽略 | 否 |
 
 ## 6. 评测器（单轮部分已由用户抽查确认并锁定）
+
+- **评审模型（2026-10-14 晚用户换的）**：`eval/judge.py` 的 `JUDGE_MODEL` 从 deepseek-v4-pro 换成了 deepseek-flash。它同时用于过程评审、"用户点头"判断（consent.py）和画像分析（persona.py）。之前所有运行的评审分数和"用户点头后买对"都是 V4 Pro 算的；重新评测旧运行会按新模型重算，数字会变，不要和旧数直接比。画像设置的测试集两组是换之前评测的。
 
 - **需求约束**（`eval/rubric.py`）：V4 Flash 只读 query，拆成原子约束（category/brand/model/function/spec/budget/service），标 hard/soft，附原文片段，冻结在 `data/rubrics/`。
 - **gold 自检**（`eval/checker.py --gold-selfcheck --split dev|test`）：core 口径开发集 92/100、测试集 187/200 通过；没通过的题记为"标注矛盾"，单列。

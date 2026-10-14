@@ -101,7 +101,8 @@ def evaluate_task(task_dir: Path, gold: dict, products: dict, conflicts: set, us
     gold_asin = str(g["asin"])
     rec = {"task_id": traj.task_id, "seconds": traj.done.get("seconds")}
     rc = traj.done.get("returncode")
-    rec["infra_error"] = traj.done.get("error") or (rc not in (0, None) and f"rc={rc}") or None
+    # 没有 done.json 说明这题没跑完（比如环境槽位占满、reset 一直失败），算基础设施异常，不当成没买
+    rec["infra_error"] = traj.done.get("error") or (rc not in (0, None) and f"rc={rc}") or (None if traj.done else "没有 done.json，没跑完")
     if any(e.get("type") == "env_error" for e in traj.harness):
         rec["infra_error"] = rec["infra_error"] or "env_error"
 
