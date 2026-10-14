@@ -13,6 +13,8 @@
  *   候选单由系统把看过的所有商品按需求单排名，每条判成符合 / 不符合 / 页面没写，证据必须能在页面原文里找到，预算按规则判。
  * - 规矩只有一条：用户最后一句话明确同意买这件，导购才能下单。回合快用完（含环境的步数上限）或用户说了再见时，
  *   按官方规则兜底：买用户最倾向的那件，不再要求用户同意；提示过必须下单、导购还是只顾着说话时，系统替它下单。
+ *   导购在还没到收尾时把对用户说的话和下单写在一条消息里（这种文字不会转给用户），被拦后又一直重复时，
+ *   系统替它把这段话转给用户，对话接着往下走。
  *   下单由系统按候选单记下的位置回到商品页、点好规格（只有一个选项的规格自动点上）再购买。
  * - 连着两次找货候选单第 1 件都没变、它也没有和用户要求冲突的地方时，不再派买手去找（剩下的只是页面没写的信息）。
  * 只用 agent 能看到的信息（对话和页面），不读 gold 和模拟买家的配置。
@@ -66,6 +68,7 @@ const POOL_LIMIT = 40;
 // 连着几次内部调用（不对用户说话、也不派买手）之后，要求导购先对外做点什么
 const MAX_INTERNAL = 3;
 const BUYER_TOOLS = SHOP_TOOLS.filter((t) => t.name !== "buy_now");
+const TEXT_ONLY = "要对用户说话，只回复文字、不要同时调用工具：和工具调用写在同一条消息里的文字不会发给用户。";
 
 const SHEET_SYSTEM = `你是导购的助手，负责把买手看过的商品按用户的需求单排名。只能依据给出的商品信息（标题、店铺、类目、价格、属性、规格、详情页内容），不要凭常识或商品名推测页面上没写出来的信息；但页面上写了意思相同或更具体的说法，就算写了（比如用户要“便携”，页面写着“户外适用、迷你设计”；用户要“锁定位置”，页面写着“人体定位追踪”）。
 
@@ -209,6 +212,9 @@ export default function (pi: ExtensionAPI) {
 	let closeIgnored = 0;
 	let closeAnnounced = false;
 	let autoTried = false;
+	// 导购最近一条消息里写的文字：和工具调用写在一起时不会转给用户，卡住时由系统替它转
+	let lastAssistantText = "";
+	let gateWarned = false;
 
 	const turnsLeft = () => shop.maxTurns - shop.turn();
 	const stepsLeft = () => MAX_STEPS - shop.steps();
@@ -544,16 +550,28 @@ export default function (pi: ExtensionAPI) {
 		return note ? `${text}\n——\n${note}` : text;
 	};
 
-	/** 导购连着在内部打转（看候选单、被拦下的下单）时，要求它先对用户说话或派买手。 */
-	function internalGate(): string | null {
+	/**
+	 * 导购连着在内部打转（看候选单、被拦下的下单）时，要求它先对用户说话或派买手。这个提醒只给一次：之后再打转、
+	 * 而它在这条消息里写了要对用户说的话（和工具调用写在一起，本来不会发出去），系统就替它转给用户，对话接着往下走。
+	 */
+	async function internalGate(): Promise<string | null> {
 		if (shop.turn() !== lastExternalTurn) {
 			lastExternalTurn = shop.turn();
 			internalCalls = 0;
 		}
 		internalCalls += 1;
 		if (internalCalls <= MAX_INTERNAL) return null;
+		const text = lastAssistantText.trim();
+		if (gateWarned && text && !shop.isDone() && shop.turn() < shop.maxTurns) {
+			logEvent({ type: "roles_relay_text", turn: shop.turn(), calls: internalCalls, text: short(text, 200) });
+			const answer = await shop.say(text);
+			return withNote(
+				shop.withTurn(`（你刚才和工具调用写在一起的那段话，系统已经替你转给了用户。以后要对用户说话，只回复文字，不要同时调用工具。）\n用户回答：${answer}`),
+			);
+		}
+		gateWarned = true;
 		logEvent({ type: "roles_internal_block", turn: shop.turn(), calls: internalCalls });
-		return "连着几次都没有对用户说话、也没有派买手。请先对用户说话（直接回复文字），或者派买手去找。";
+		return `连着几次都没有对用户说话、也没有派买手。请先对用户说话，或者派买手去找。${TEXT_ONLY}`;
 	}
 
 	// ---- 买手 ----
@@ -784,6 +802,11 @@ export default function (pi: ExtensionAPI) {
 
 	// ---- 事件 ----
 
+	pi.on("message_end", async (event: any) => {
+		if (event?.message?.role === "assistant") lastAssistantText = textOf(event.message.content);
+		return undefined;
+	});
+
 	pi.on("before_agent_start", async (event) => {
 		if (!opening) {
 			opening = String(event.prompt ?? "");
@@ -865,7 +888,7 @@ export default function (pi: ExtensionAPI) {
 			if (urgent && lastSheet.length) return reply(shop.withTurn(closingNote()));
 			const budget = urgent ? Math.max(1, turnsLeft() - 4) : Math.min(BUYER_STEPS, turnsLeft() - RESERVE, stepsLeft() - RESERVE);
 			if (budget <= 0) {
-				const gate = internalGate();
+				const gate = await internalGate();
 				return reply(gate ?? withNote(shop.withTurn(`回合不多了（还剩 ${turnsLeft()} 个），不能再派买手去找。请从候选单里请用户挑一件。`)));
 			}
 			await reqJob;
@@ -876,7 +899,7 @@ export default function (pi: ExtensionAPI) {
 				const top = lastSheet[0];
 				const conflict = reqs.some((r) => r.status === "已确认" && top?.checks.get(r.id)?.verdict === "不符合");
 				if (top && !conflict) {
-					const gate = internalGate();
+					const gate = await internalGate();
 					logEvent({ type: "roles_find_stale", turn: shop.turn(), top: top.item.asin, request });
 					return reply(
 						gate ??
@@ -919,7 +942,7 @@ export default function (pi: ExtensionAPI) {
 			asin: Type.Optional(Type.String({ description: "只看某一件商品时填它的商品ID" })),
 		}),
 		async execute(_toolCallId: string, params: any) {
-			const gate = internalGate();
+			const gate = await internalGate();
 			if (gate) return reply(gate);
 			const asin = String(params?.asin ?? "").trim();
 			if (asin) {
@@ -948,14 +971,14 @@ export default function (pi: ExtensionAPI) {
 			const wanted = (Array.isArray(params?.options) ? params.options : []).map(String).filter(Boolean);
 			const it = pool.get(asin);
 			if (!it) {
-				const gate = internalGate();
+				const gate = await internalGate();
 				return reply(gate ?? `候选单里没有商品 ${asin}，请照抄候选单上方括号里的商品ID。`);
 			}
 			await reqJob;
 			const forced = mustClose();
 			const agreed = consentFor(asin);
 			if (!agreed && !forced) {
-				const gate = internalGate();
+				const gate = await internalGate();
 				if (gate) return reply(gate);
 				// 拦截审计用：放行的话会选哪些规格（只有一个选项的会自动点上）
 				const planned = [...wanted, ...Object.values(it.options ?? {}).filter((vs) => vs.length === 1).map((vs) => vs[0])];
@@ -972,7 +995,8 @@ export default function (pi: ExtensionAPI) {
 				const next = refused
 					? "用户明确说了不要，不要再劝用户买这件：问清用户的顾虑，看看候选单里有没有更合适的；用户要的信息页面上确实没有，如实说明后让用户决定。"
 					: "先把这件商品、规格和价格报给用户，问用户要不要买；用户点头后再调用 buy。页面上没写的信息如实告诉用户，让用户自己决定。";
-				return reply(withNote(shop.withTurn(`【还不能下单】用户最后一句话没有明确同意买这件（用户说：「${short(last, 80)}」）。${next}`)));
+				const timing = `现在还没到对话结束：只有用户说了再见、或者回合快用完时（系统会提示【现在必须下单】），才能不经用户同意下单，现在还剩 ${turnsLeft()} 个回合。`;
+				return reply(withNote(shop.withTurn(`【还不能下单】用户最后一句话没有明确同意买这件（用户说：「${short(last, 80)}」）。${timing}${next}${TEXT_ONLY}`)));
 			}
 			const res = await purchase(it, wanted, { forced });
 			logEvent({ type: "roles_buy", turn: shop.turn(), asin, options: wanted, consent: agreed, forced, done: res.done, note: res.done ? "" : short(res.text, 120) });

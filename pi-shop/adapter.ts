@@ -9,8 +9,8 @@
  *   论文多轮设置（SHOP_MAX_QUESTIONS=0）：买家文件里预置了开场对话，提问不限次数，但和商店动作一起计入回合上限
  *   （SHOP_MAX_LLM_TURNS）；照官方做法，每次返回都附上当前回合数。
  * - 分工模式（SHOP_ROLES=1，第四版 harness，见 pi-shop/roles.ts）：主 agent 是导购，不注册商店工具；买手和下单动作
- *   通过 "shop:api" 拿到的 act() 操作商店。回合只算对外的动作：每个商店动作（含被合法性校验拦下的）、每句对用户说的话；
- *   导购和买手内部的调用不算回合，另外统计调用次数和 token。
+ *   通过 "shop:api" 拿到的 act() 操作商店，导购卡住时 roles.ts 用 say() 把它写的话转给用户。回合只算对外的动作：
+ *   每个商店动作（含被合法性校验拦下的）、每句对用户说的话；导购和买手内部的调用不算回合，另外统计调用次数和 token。
  */
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -274,6 +274,8 @@ export interface ShopApi {
 	withTurn: (text: string) => string;
 	act: (name: string, params: Params, who: string) => Promise<ActResult>;
 	countBlocked: () => number;
+	/** 把导购写的一段话转给用户，返回用户的回答（算一个回合）。 */
+	say: (text: string) => Promise<string>;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -366,6 +368,7 @@ export default function (pi: ExtensionAPI) {
 				turn += 1;
 				return turn;
 			},
+			say: (text: string) => askShopper(text, "relay"),
 		};
 		pi.events.on("shop:api", (register: unknown) => {
 			if (typeof register === "function") register(api);
@@ -396,7 +399,7 @@ export default function (pi: ExtensionAPI) {
 	const sh: ShopperConfig = shopper;
 	const history: QA[] = [];
 
-	async function askShopper(question: string, via: "tool" | "text"): Promise<string> {
+	async function askShopper(question: string, via: "tool" | "text" | "relay"): Promise<string> {
 		if (ROLES_MODE) turn += 1;
 		let answer = "（用户暂时没有回应）";
 		let usage: unknown = null;
