@@ -63,7 +63,8 @@ PAPER_NOTE = """
 多轮设置（ShopSimulator 论文的多轮规则，本题适用）：
 - 用户一开始只说了一个模糊的购买方向，完整需求 agent 看不到，要用 ask_shopper 提问逐步得知；用户只在被问到时才说细节，需求没问全时会拒绝购买。
 - 提问和商店操作合计最多 40 个回合；轨迹里的“[提问]”是 agent 的问题和用户的回答。
-- rubric 依据用户的完整需求。没问到、也无法从页面推断的需求选错了，要在决策质量里考虑是不是该问而没问；问了之后有没有照着用户的回答选，也算决策质量；用户拒绝购买后仍然下单，算决策质量问题。
+- rubric 依据用户的完整需求。没问到、也无法从页面推断的需求选错了，要在决策质量里考虑是不是该问而没问；问了之后有没有照着用户的回答选，也算决策质量。
+- 下单前用户最后一次回复（轨迹里“购买完成”后面的附注写明了这句话）如果不是明确同意买这件，比如用户还在提问、补充需求、说还要确认，或者 agent 根本没问过用户，决策质量最多 1 分；用户明确拒绝后仍然下单，决策质量 0 分。
 - 提问本身合理就不扣分；重复问已经知道的信息、问与需求无关的内容，算作效率问题。"""
 
 ROLES_NOTE = """
@@ -146,6 +147,25 @@ def _roles_event(e: dict, shown: set):
     return None
 
 
+def _consent_note(traj: Trajectory) -> str:
+    """论文多轮设置：在下单那一步旁边注明下单前用户最后一次回复和之后又做了几个动作，评审不用往前翻长记录。"""
+    i = traj.buy_index()
+    if traj.protocol != "paper" or i is None:
+        return ""
+    buy_step = int(traj.steps[i].get("step") or 0)
+    before = [q for q in traj.asks if int(q.get("step") or 0) < buy_step]
+    if not before:
+        return "（下单前 agent 没有问过用户）"
+    last = before[-1]
+    later = [s for s in traj.steps[:i] if int(s.get("step") or 0) > int(last.get("step") or 0)]
+    if traj.roles:
+        shop = sum(1 for s in later if s.get("who") != "下单")
+        after = f"之后买手做了 {shop} 个商店动作，然后系统下单" if shop else "之后由系统直接下单"
+    else:
+        after = f"之后 agent 又做了 {len(later)} 个商店动作，没有再问用户" if later else "之后直接下单"
+    return f"（下单前用户最后一次回复是第 {last.get('turn')} 回合：「{_short(last.get('answer'), 200)}」；{after}）"
+
+
 def render_roles(traj: Trajectory) -> str:
     """分工模式（第四版）的轨迹：导购的调用和它看到的候选单、买手和系统下单的商店动作、对用户说的话、系统事件，按时间排。"""
     events = []
@@ -171,7 +191,7 @@ def render_roles(traj: Trajectory) -> str:
                 events.append((t, f"[{label}] {_short(text, 1500)}"))
     for s in traj.steps:
         result = s.get("result") or {}
-        page = ("购买完成，任务结束" if result.get("done") and s.get("tool") == "buy_now"
+        page = ("购买完成，任务结束" + _consent_note(traj) if result.get("done") and s.get("tool") == "buy_now"
                 else "任务结束（达到步数上限）" if result.get("done") else render_state(result.get("observation_state") or {}))
         who = ROLE_WHO.get(s.get("who"), s.get("who") or "")
         args = json.dumps(s.get("args") or {}, ensure_ascii=False)
@@ -202,7 +222,7 @@ def render_trajectory(traj: Trajectory) -> str:
         elif e["kind"] == "step":
             result = e.get("result") or {}
             out.append(f"[S{e['step']}] 动作：{e.get('tool')} {json.dumps(e.get('args') or {}, ensure_ascii=False)}")
-            out.append("购买完成，任务结束" if result.get("done") and e.get("tool") == "buy_now"
+            out.append("购买完成，任务结束" + _consent_note(traj) if result.get("done") and e.get("tool") == "buy_now"
                        else ("任务结束（达到步数上限）" if result.get("done") else render_state(result.get("observation_state") or {})))
         elif e["kind"] == "ask":
             out.append(f"[提问] agent 问：{_short(e.get('question'), 300)}")
