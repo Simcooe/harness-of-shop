@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llm import chat_json  # noqa: E402
-from traj import Trajectory  # noqa: E402
+from traj import Trajectory, load_jsonl, text_of  # noqa: E402
 
 JUDGE_MODEL = "deepseek-v4-pro"
 DIMENSIONS = ["search_strategy", "candidate_utilization", "evidence_verification", "decision_quality", "termination_efficiency"]
@@ -66,6 +66,15 @@ PAPER_NOTE = """
 - rubric 依据用户的完整需求。没问到、也无法从页面推断的需求选错了，要在决策质量里考虑是不是该问而没问；问了之后有没有照着用户的回答选，也算决策质量；用户拒绝购买后仍然下单，算决策质量问题。
 - 提问本身合理就不扣分；重复问已经知道的信息、问与需求无关的内容，算作效率问题。"""
 
+ROLES_NOTE = """
+
+分工结构（本题的 agent 是第四版 harness，适用）：
+- 导购：只和用户对话，看不到商店页面。它派买手去商店里找货（派买手去找），查看系统整理的候选单或某件看过的商品（看候选单，不花回合），决定买哪件、选什么规格（下单）。
+- 买手：每次派活新开一个会话，只在商店里搜索、翻页、打开商品、看规格和详情页；不能下单，不和用户说话。轨迹里标"买手"的环境步骤是它做的；"系统替买手返回上一页"是系统为了打开另一件商品替它做的。
+- 系统：按用户原话整理需求单，按页面原文把看过的商品排成候选单；只有用户最后一句话明确同意买这件时才执行下单，回合快用完或用户说再见时按官方规则兜底；下单时由系统回到商品页、点好规格再购买（轨迹里标"系统下单"）。
+- 回合只算对外的动作：商店动作（含被拦下的）和对用户说的话；导购看候选单、被拦下的下单不算回合。
+- 把导购、买手和系统当作一个整体 agent 来评分，标准和其他设置一样。"""
+
 
 def _short(text, n) -> str:
     text = str(text or "").replace("\n", " ")
@@ -99,7 +108,90 @@ def render_state(st: dict) -> str:
     return str(page)
 
 
+ROLE_TOOLS = {"find_products": "派买手去找", "show_candidates": "看候选单", "buy": "下单"}
+ROLE_WHO = {"买手": "买手", "下单": "系统下单"}
+
+
+def _roles_event(e: dict, shown: set):
+    """分工模式的 harness 事件；收尾提示每个回合只显示一次（系统每次附提示都会记一条）。"""
+    kind = e.get("type")
+    if kind == "guard_block":
+        return f"[系统拦截，未执行] 买手 {e.get('tool')} {json.dumps(e.get('args') or {}, ensure_ascii=False)}：{_short(e.get('reason'), 120)}"
+    if kind == "serial_block":
+        return f"[未执行：同一回合只执行一个动作] {ROLE_TOOLS.get(e.get('tool'), e.get('tool'))} {_short(json.dumps(e.get('args') or {}, ensure_ascii=False), 200)}"
+    if kind == "roles_auto_back":
+        return f"（系统替买手返回上一页，以便执行 {e.get('tool')}）"
+    if kind == "roles_consent_block":
+        return f"[系统拦截，未执行] 下单 {e.get('asin')}：用户最后一句话没有明确同意买这件（用户说：「{_short(e.get('quote'), 80)}」）"
+    if kind in ("roles_close_soft", "roles_close_hard"):
+        key = (kind, e.get("turn"))
+        if key in shown or (kind == "roles_close_hard" and kind in shown):
+            return None
+        shown.update({key, kind})
+        if kind == "roles_close_soft":
+            return f"[系统提醒] 还剩 {e.get('left')} 个回合，请尽快下单"
+        return "[系统提醒] 现在必须下单" + ("（用户已结束对话）" if e.get("bye") else f"（只剩 {e.get('left')} 个回合）")
+    if kind == "roles_find_stale":
+        return "[系统] 不再派买手去找：最近两次找货候选单第 1 件都没变，它也没有和用户要求冲突的地方"
+    if kind == "roles_internal_block":
+        return "[系统提醒] 连着几次没有对用户说话、也没有派买手"
+    if kind == "roles_buy":
+        how = "系统按官方规则替导购下单" if e.get("auto") else "用户已同意" if e.get("consent") else "按官方规则兜底，未经用户同意" if e.get("forced") else ""
+        result = "" if e.get("done") else f"，没有买成：{_short(e.get('note'), 100)}"
+        return f"[下单] 买 {e.get('asin')}，规格 {json.dumps(e.get('options') or [], ensure_ascii=False)}（{how}）{result}"
+    if kind == "roles_buyer_error":
+        return f"[系统] 买手出错：{_short(e.get('error'), 120)}"
+    if kind == "turn_cap":
+        return "[系统] 回合用完，任务终止"
+    return None
+
+
+def render_roles(traj: Trajectory) -> str:
+    """分工模式（第四版）的轨迹：导购的调用和它看到的候选单、买手和系统下单的商店动作、对用户说的话、系统事件，按时间排。"""
+    events = []
+    for f in sorted((traj.dir / "session").glob("*.jsonl")):
+        for row in load_jsonl(f):
+            msg = row.get("message") or {}
+            if row.get("type") != "message":
+                continue
+            t = str(row.get("timestamp") or "")
+            if msg.get("role") == "assistant":
+                calls = [c for c in msg.get("content") or [] if isinstance(c, dict) and c.get("type") == "toolCall"]
+                if not calls:
+                    continue  # 只回复文字的话由适配层转给用户，见下面的“[提问]”
+                text = text_of(msg.get("content")).strip()
+                lines = [f"导购（内部，不发给用户）：{_short(text, 300)}"] if text else []
+                for c in calls:
+                    args = json.dumps(c.get("arguments") or {}, ensure_ascii=False)
+                    lines.append(f"导购调用「{ROLE_TOOLS.get(c.get('name'), c.get('name'))}」{_short(args, 300)}")
+                events.append((t, "\n".join(lines)))
+            elif msg.get("role") == "toolResult" and msg.get("toolName") in ROLE_TOOLS:
+                text = text_of(msg.get("content")).strip()
+                label = "商品详情卡" if text.startswith("【商品 [") else f"{ROLE_TOOLS[msg.get('toolName')]}的结果"
+                events.append((t, f"[{label}] {_short(text, 1500)}"))
+    for s in traj.steps:
+        result = s.get("result") or {}
+        page = ("购买完成，任务结束" if result.get("done") and s.get("tool") == "buy_now"
+                else "任务结束（达到步数上限）" if result.get("done") else render_state(result.get("observation_state") or {}))
+        who = ROLE_WHO.get(s.get("who"), s.get("who") or "")
+        args = json.dumps(s.get("args") or {}, ensure_ascii=False)
+        events.append((str(s.get("t") or ""), f"[S{s.get('step')}]（第 {s.get('turn')} 回合）{who}：{s.get('tool')} {args}\n{page}"))
+    for q in traj.asks:
+        events.append((str(q.get("t") or ""), f"[提问]（第 {q.get('turn')} 回合）导购问：{_short(q.get('question'), 600)}\n       用户答：{_short(q.get('answer'), 200)}"))
+    shown = set()
+    for e in traj.harness:
+        line = _roles_event(e, shown)
+        if line:
+            events.append((str(e.get("t") or ""), line))
+    out = [text for _, text in sorted(events, key=lambda x: x[0])]
+    if not traj.purchased:
+        out.append("\n（轨迹结束，没有出现“购买完成”）")
+    return "\n".join(out)
+
+
 def render_trajectory(traj: Trajectory) -> str:
+    if traj.roles:
+        return render_roles(traj)
     out = []
     for e in traj.timeline():
         if e["kind"] == "assistant":
@@ -146,7 +238,7 @@ def render_trajectory(traj: Trajectory) -> str:
 def judge(traj: Trajectory, rubric: dict) -> dict:
     cons = "\n".join(f"{c['id']} [{c['type']}/{c['hardness']}] {c['description']}" for c in rubric["constraints"])
     if traj.protocol == "paper":
-        system = SYSTEM + PAPER_NOTE
+        system = SYSTEM + PAPER_NOTE + (ROLES_NOTE if traj.roles else "")
         need = f"用户的开场白：{traj.agent_query}\n用户的完整需求（agent 看不到）：{traj.query}"
     elif traj.multiturn:
         system = SYSTEM + MULTITURN_NOTE.replace("{ask_rule}", ASK_RULE if traj.can_ask else NO_ASK_RULE)
