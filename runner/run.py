@@ -11,6 +11,8 @@ agent 侧只拿到需求原文；gold、画像等字段不进入 pi 进程。每
 --state-window K 只给模型最近 K 步原文（0 表示保留全部历史）。
 分工模式（--roles，第四版）：主 agent 是导购（prompts/roles_sales.md），不能直接操作商店；买手由 pi-shop/roles.ts
 在同一个进程里另开 pi 会话（prompts/roles_buyer.md），会话记录在 task_<id>/buyer_sessions/。只用于论文多轮设置，不加载插件和任务状态层。
+画像设置（--persona，配合按 --persona 生成的开场白）：agent 的系统提示末尾附上用户画像（prompts/persona_agent.md），
+买家只知道简版需求和规格选项（runner/paper_protocol.py）。画像另存在 task_<id>/persona.json。
 """
 import argparse
 import json
@@ -24,7 +26,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from paper_protocol import OPENING_REQUEST, SHOPPER_PROMPT as PAPER_SHOPPER_PROMPT, shopper_system
+from paper_protocol import (
+    OPENING_REQUEST,
+    PERSONA_AGENT_BLOCK,
+    PERSONA_SHOPPER_RULE,
+    SHOPPER_PROMPT as PAPER_SHOPPER_PROMPT,
+    persona_agent_block,
+    persona_profile,
+    persona_shopper_system,
+    shopper_system,
+    short_query,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 PRIVATE_RESET_KEYS = {"goal_options", "user_persona", "reason_key", "_trace_target"}
@@ -140,16 +152,29 @@ def run_task(task_id: int, args, run_dir: Path, base_env: dict, system_prompt: s
             if opening["full_query"].strip() != query:
                 raise RuntimeError("开场白数据的完整需求和环境给的需求不一致")
             agent_query = opening["opening"]
+        task_prompt = system_prompt
+        shopper_query = query
+        if args.persona:
+            profile = persona_profile(reset)
+            shopper_query = short_query(reset)
+            if not opening.get("persona") or str(opening.get("shopper_query", "")).strip() != shopper_query:
+                raise RuntimeError("开场白不是按这道题的简版需求生成的")
+            task_prompt = f"{system_prompt}\n\n{persona_agent_block(profile)}"
+            (task_dir / "persona.json").write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n")
         public = {k: v for k, v in reset.items() if k not in PRIVATE_RESET_KEYS}
         public["query"] = query
         public["agent_query"] = agent_query
+        if args.persona:
+            public["shopper_query"] = shopper_query
         (task_dir / "reset_public.json").write_text(json.dumps(public, ensure_ascii=False, indent=2) + "\n")
         shopper_file = task_dir / "shopper.json"
         if args.ask:
             shopper = {"model": args.shopper_model, "max_tokens": args.shopper_max_tokens}
             if openings:
                 # 官方做法：买家还知道标准答案的规格选项。agent 没有文件工具，读不到这个文件。
-                shopper["system"] = shopper_system(query, reset.get("goal_options"), args.shopper_prompt_file)
+                goal_options = reset.get("goal_options")
+                shopper["system"] = (persona_shopper_system(shopper_query, goal_options, args.shopper_prompt_file) if args.persona
+                                     else shopper_system(query, goal_options, args.shopper_prompt_file))
                 shopper["history"] = [{"question": OPENING_REQUEST, "answer": agent_query}]
             else:
                 system = args.shopper_prompt_file.read_text(encoding="utf-8").strip()
@@ -168,7 +193,7 @@ def run_task(task_id: int, args, run_dir: Path, base_env: dict, system_prompt: s
             cmd += ["-e", str(ROLES_PATH)]
         cmd += [
             "--no-skills", "--no-prompt-templates", "--no-context-files",
-            "--system-prompt", system_prompt,
+            "--system-prompt", task_prompt,
             "--model", args.model, "--thinking", "off",
             "--session-dir", str(task_dir / "session"),
             agent_query,
@@ -229,6 +254,7 @@ def main() -> None:
     parser.add_argument("--roles", action="store_true", help="第四版：前台导购 + 后台买手（pi-shop/roles.ts），只用于论文多轮设置")
     parser.add_argument("--multiturn", default="", help="多轮数据（data/multiturn/<split>.jsonl）：agent 拿到模糊需求")
     parser.add_argument("--paper-openings", default="", help="论文多轮模式：买家开场白（data/multiturn_paper/<split>_openings.jsonl），自动开启 ask")
+    parser.add_argument("--persona", action="store_true", help="画像设置：agent 拿到用户画像，买家只知道简版需求；开场白须按 --persona 生成")
     parser.add_argument("--ask", action="store_true", help="提供 ask_shopper 工具（模拟买家回答）")
     parser.add_argument("--shopper-model", default="qwen3.7-plus")
     parser.add_argument("--shopper-prompt-file", type=Path, default=None, help="默认：论文模式用官方买家提示，否则 prompts/shopper.md")
@@ -248,6 +274,8 @@ def main() -> None:
         sys.exit("--paper-openings 和 --multiturn 不能同时使用")
     if args.roles and (not paper or args.plugin != "off" or args.state != "off"):
         sys.exit("--roles 只用于论文多轮设置（--paper-openings），而且不和 --plugin、--state 一起用")
+    if args.persona and not paper:
+        sys.exit("--persona 只用于论文多轮设置（--paper-openings）")
     if args.system_prompt_file is None:
         args.system_prompt_file = str(SALES_PROMPT if args.roles else BASE_PROMPT)
     if paper:
@@ -298,6 +326,9 @@ def main() -> None:
         "shopper_model": args.shopper_model if args.ask else None,
         "shopper_prompt_file": str(Path(args.shopper_prompt_file).resolve().relative_to(ROOT)) if args.ask else None,
         "max_questions": args.max_questions if args.ask else None,
+        "persona": args.persona,
+        "persona_agent_block": PERSONA_AGENT_BLOCK.read_text(encoding="utf-8").strip() if args.persona else None,
+        "persona_shopper_rule": PERSONA_SHOPPER_RULE.read_text(encoding="utf-8").strip() if args.persona else None,
         "system_prompt": system_prompt,
         "max_llm_turns": args.max_llm_turns,
         "n_tasks": len(task_ids),

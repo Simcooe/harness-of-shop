@@ -1,6 +1,6 @@
-# 交接文档（2026-10-13 晚，第三版）
+# 交接文档（2026-10-14，第三版，画像设置已补上）
 
-给接手的会话：先读完第 0、1、2 节再动手。项目根目录 `/Users/ywwl/long-horizon-harness`。设计细节和每一轮的实施记录在 `docs/harness_design.md`（第七节论文多轮复现和 v2，第八节第三版，第九节第四版）。
+给接手的会话：先读完第 0、1、2 节再动手。项目根目录 `/Users/ywwl/long-horizon-harness`。设计细节和每一轮的实施记录在 `docs/harness_design.md`（第七节论文多轮复现和 v2，第八节第三版，第九节第四版，第十节画像设置）。
 
 ## 0. 工作方式（用户明确要求过，必须遵守）
 
@@ -15,6 +15,7 @@
   - 模型代理的地址和密钥只在 `.env`（权限 600），用 `MODEL_PROXY_API_KEY` 引用，绝不打印、不写进任何文件或提交。所有实验结束后提醒用户轮换密钥。
   - agent 绝不能看到 gold。runner 会去掉 reset 返回的 `goal_options`、`user_persona`、`reason_key`、`_trace_target`。pi 的内置工具全部禁用，agent 没有文件访问能力。`data/private/` 只给评测用。
   - 例外：论文多轮模式下，按官方做法，模拟买家（不是 agent）知道标准答案的规格选项，写在每题的 `runs/<run>/task_<id>/shopper.json` 里，agent 读不到。
+  - 画像设置（`--persona`）下，用户画像是这个设置的输入，按论文做法附在 agent 的系统提示里（不是 gold）；`reset_public.json` 里照旧不放。
   - 作者仓库和官方仓库都没有 LICENSE：代码和提示原文只放在 gitignore 的 `third_party/` 里，通过 HTTP 调用或运行时读取，不复制进项目目录，也不公开。
   - 环境服务只绑定 127.0.0.1。
 
@@ -43,6 +44,7 @@
 - 用户同意只补跑测试集上卡死的 3 题（`runs/test_paper_v4_fix3`，标明是看过测试集后修复的）：3 题都买对了，转话没触发，卡死没再出现。正式成绩仍是 90% / 56%。
 - `docs/diagnosis_check.md`（失败原因诊断的抽查清单，附 Claude 的判断）还在等用户确认，没有提交。
 - 所有实验结束后提醒用户轮换模型代理的密钥。
+- **新方向：画像设置（"懂你的导购"，`docs/harness_design.md` 第十节）**。用户看了官方画像数据后同意：用户只知道简版需求（照论文），问到不知道的细节让它说没想好、不许编，测试集 200 道。评测已搭好（画像开发集 50、测试集 200，开场白、需求约束、答案自检都已冻结），测试集没跑过。开发集上第四版不改直接跑：严格成功 64%，同样 50 题用户知道完整需求时 74%（差距在噪声以内），新冒出来的错主要是"漏用画像"（用户只知道简版需求、很容易点头，导购没拿画像近期行为里的区分点去挑）和"被画像带偏"（拿画像里的品牌去搜）。开发集上发现模拟用户会把没想好的细节当成购买条件，规则补了一句后基本消失（第十节）。改进方案（画像分级）等用户确认。
 
 ### 2.2 可能的下一步
 
@@ -80,6 +82,8 @@ pi-shop/roles.ts       第四版：前台导购 + 后台买手（--roles），�
                        - 导购的工具 find_products / show_candidates / buy；买手每次找货用 SDK 新开一个 pi 会话（buyer_sessions/）
                        - 通过 pi.events 的 "shop:api" 拿到适配层的商店接口；下单由系统按候选单回到商品页、点好规格再买
 prompts/roles_sales.md 第四版导购的系统提示；prompts/roles_buyer.md 买手的系统提示
+prompts/persona_agent.md   画像设置：附在 agent 系统提示末尾的画像段（{persona} 换成这道题的画像）
+prompts/shopper_persona.md 画像设置：附在官方买家提示末尾的规则（只知道简版需求和规格；没想好的细节让 agent 挑、不编、不算购买条件）
 prompts/base.md        基线系统提示（所有组共用，只有一句话）
 prompts/shopper.md     我们自己多轮设置的模拟买家提示（已冻结）
 runner/run.py          批量运行：reset → 写 reset_public.json → 启动干净的 pi 进程 → release → done.json
@@ -89,18 +93,22 @@ runner/run.py          批量运行：reset → 写 reset_public.json → 启动
                        买家回答最多 512 token）。run_config.json 里记 protocol = single / ours / paper。
                        已有 done.json 的题会跳过（中断后重跑同名即可续跑）。环境槽位满时 reset 会等待重试。
                        --state off|all|组件、--state-window K（第三版）；--roles（第四版，只能和 --paper-openings 一起用）。
-runner/paper_protocol.py   论文多轮规则：按官方 shopper.reset 拼买家系统提示（官方买家提示 + 完整需求 + 标准答案规格选项）
-scripts/export_tasks.py    导出 data/test_ids.json（作者 Final-200）、data/dev_ids.json、data/private/gold.jsonl
+                       --persona（画像设置，只能和 --paper-openings 一起用，开场白须按 --persona 生成）。
+runner/paper_protocol.py   论文多轮规则：按官方 shopper.reset 拼买家系统提示（官方买家提示 + 完整需求 + 标准答案规格选项）；
+                       画像设置下换成简版需求，并附上 prompts/shopper_persona.md
+scripts/export_tasks.py    导出 data/test_ids.json（作者 Final-200）、data/dev_ids.json、画像设置的 data/persona_{test,dev}_ids.json、
+                           data/private/gold.jsonl（split 为 test / dev / persona_test / persona_dev）
 scripts/make_multiturn.py  构造模糊需求（删掉规格类约束，规则 + LLM 校验）→ data/multiturn/<split>.jsonl
 scripts/make_paper_openings.py  论文多轮的买家开场白（每题生成一次并冻结）→ data/multiturn_paper/<split>_openings.jsonl
 scripts/show_traj.py       看一条轨迹：python3 scripts/show_traj.py runs/<run>/task_<id> [--full] [--eval]
 scripts/make_spotcheck.py  生成单轮人工抽查清单（docs/spotcheck_dev.md + docs/traces/）
 scripts/run_ablation.sh / run_addone.sh   v0 消融（已指向 plugin_v0.ts）；run_test.sh 为第二遍重复实验准备
 eval/                  评测，见第 6 节
-data/rubrics/          300 题冻结的需求约束（开发集 100 + 测试集 200）
+data/rubrics/          550 题冻结的需求约束（开发集 100 + 测试集 200 + 画像开发集 50 + 画像测试集 200）
 data/multiturn/        dev.jsonl（100 题：信息缺失 83 + 对照 17）、test.jsonl（199 题：164 + 35；1 题校验没过，在 test_rejected.jsonl）
-data/multiturn_paper/  论文多轮的开场白：dev_openings.jsonl（100 题）、test_openings.jsonl（200 题）
-data/cache/            products_min.json、gold_selfcheck_{dev,test}.jsonl、shopper_probe_dev.jsonl、llm/（LLM 调用缓存）
+data/multiturn_paper/  论文多轮的开场白：dev_openings.jsonl（100 题）、test_openings.jsonl（200 题）；
+                       画像设置 persona_{dev,test}_openings.jsonl（按简版需求生成）、persona_dev_fullneed_openings.jsonl（对照组，按完整需求生成）
+data/cache/            products_min.json、gold_selfcheck_{dev,test,persona_dev,persona_test}.jsonl、shopper_probe_dev.jsonl、llm/（LLM 调用缓存）
 third_party/shopsim_official/  从官方仓库取的提示（没有许可证，gitignore）：
                        shopper_paper.md（官方配置 multi_eval/configs/standard/qwen3_8b.yaml 里的买家提示 + 任务模板）、
                        agent_paper.md（官方 agent 提示改写成工具版，"论文提示词"对比组用）
@@ -167,6 +175,22 @@ python3 runner/run.py --run-name dev_paper_v4 --paper-openings data/multiturn_pa
 ```
 
 第四版开发集 100 题、6 个 worker 约 20 分钟。
+
+画像设置（`docs/harness_design.md` 第十节）：开场白已为画像开发集和测试集生成（买家只知道简版需求）；重新生成要加 `--persona`。运行时加 `--persona`：
+
+```bash
+python3 scripts/make_paper_openings.py --persona --tasks data/persona_dev_ids.json --out data/multiturn_paper/persona_dev_openings.jsonl
+```
+
+```bash
+python3 runner/run.py --run-name dev_pers_v4 --paper-openings data/multiturn_paper/persona_dev_openings.jsonl --persona --roles --workers 6
+```
+
+评测照常跑 `eval/evaluate.py`，再跑画像专用的分析（约束的信息在哪里、买下的商品满足了多少；`--shopper` 是模拟用户质检）：
+
+```bash
+python3 eval/persona.py runs/dev_pers_v4
+```
 
 **评测**：`--judge` 会调 V4 Pro 做过程评审，有缓存，可以多个评测并行跑。开发集一般不带评审。`--diagnose` 加失败原因诊断。论文多轮的运行会自动判断下单前用户有没有点头（V4 Pro，有缓存）。
 
@@ -282,6 +306,10 @@ v2 + 规格补点（`--plugin all,closing,choice,spec_fill`，2026-10-14）：�
 | dev_paper_v4b | 开发集，第四版修死循环之后 | 否 |
 | test_paper_v4_fix3 | 测试集上卡死的 3 题，修死循环之后补跑（看过测试集后修复，不计入正式成绩） | 是 |
 | test_paper_v2/eval_backup_20261014 | 加"用户点头"指标重评之前的 v2 测试集评测结果（备份） | — |
+| dev_pers_v4 | 画像开发集 50 题，第四版不改（用户只知道简版需求，agent 有画像） | 否 |
+| dev_pers_v4_fullneed | 对照：同样 50 题，用户知道完整需求、没有画像 | 否 |
+| dev_pers_v4_rule1 | 画像开发集，第一版用户规则（用户会把没想好的细节当成购买条件，已弃用，只作记录） | 否 |
+| dev_pers_v4_smoke | 画像设置冒烟测试（2 题） | 否 |
 | smoke* | 冒烟测试，可忽略 | 否 |
 
 ## 6. 评测器（单轮部分已由用户抽查确认并锁定）

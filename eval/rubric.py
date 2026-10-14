@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """第一步：从 query 抽取需求约束（rubric），只看 query、不看 gold，结果冻结到 data/rubrics/。
 
-用法：python3 eval/rubric.py [--split dev|test|all]
+用法：python3 eval/rubric.py [--split dev|test|persona_dev|persona_test|all]
 """
 import argparse
 import json
@@ -126,7 +126,7 @@ def extract(task: dict) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--split", default="all", choices=["dev", "test", "all"])
+    parser.add_argument("--split", default="all", choices=["dev", "test", "persona_dev", "persona_test", "all"])
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
 
