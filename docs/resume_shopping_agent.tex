@@ -1,9 +1,9 @@
 \datedsubsection{\textbf{Shopping Agent：面向多轮导购的 Harness 设计与过程评测}}{2026.10 - 至今}
-项目背景: 针对购物 Agent 在多轮导购中未经用户确认即下单、难以利用用户画像的问题，在 ShopSimulator 中不改模型权重，以评测驱动 Harness 迭代。
+项目背景: 针对购物 Agent 在多轮导购中未经用户确认即下单、难以利用用户画像的问题，不改模型权重，以评测驱动 Harness 迭代。
 
 
 \begin{itemize}[parsep=0.5ex]
- \item \textbf{Harness 架构设计}: 将单 Agent 拆分为导购与买手：导购负责对话与决策，买手在独立会话中检索、比对商品，两侧只传递经页面原文核验的需求单与候选单，下单须用户明确确认；严格成功率 50\% $\rightarrow$ 90\%，用户确认后买对 22\% $\rightarrow$ 56\%
+ \item \textbf{Harness 架构设计}: 定位到单 Agent 问询后连续操作越多越易跳过确认（操作 4 步以上时 91\% 的下单未经确认），据此拆分导购与买手，需求单、候选单逐条溯源至用户原话与页面原文，下单须用户明确确认；严格成功率 50\% $\rightarrow$ 90\%，用户确认后买对 22\% $\rightarrow$ 56\%
 \end{itemize}
 
 \begin{itemize}[parsep=0.5ex]

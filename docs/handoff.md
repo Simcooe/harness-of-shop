@@ -1,4 +1,4 @@
-# 交接文档（2026-10-14，第三版，画像设置已补上）
+# 交接文档（2026-10-15，第三版，画像设置和消融已补上）
 
 给接手的会话：先读完第 0、1、2 节再动手。项目根目录 `/Users/ywwl/long-horizon-harness`。设计细节和每一轮的实施记录在 `docs/harness_design.md`（第七节论文多轮复现和 v2，第八节第三版，第九节第四版，第十节画像设置）。
 
@@ -45,11 +45,17 @@
 - `docs/diagnosis_check.md`（失败原因诊断的抽查清单，附 Claude 的判断）还在等用户确认，没有提交。
 - 所有实验结束后提醒用户轮换模型代理的密钥。
 - **新方向：画像设置（"懂你的导购"，`docs/harness_design.md` 第十节）**。用户只知道简版需求（照论文），细节在用户画像里，agent 能看到画像；问到不知道的细节模拟用户说没想好、不编，也不当购买条件（开发集上发现后补的规则）。题目：画像开发集 50、测试集 200。第四版不改直接跑，新冒出来的错是"漏用画像"和"被画像里的牌子带偏"。改进"画像分级"（用户同意："那你做吧"）：画像里最近的搜索词当要求用、平时的偏好只做参考、和用户的话冲突听用户的，`--profile-tiers`。结果：开发集严格成功 64% → 82%，**测试集 66% → 81%**（36 好 7 差），用户点头后买对 61% → 72%，画像搜索词里的要求满足率 82% → 91%。测试集两组各跑一次，是用户同意的方案里的最后一步。
+- **2026-10-15：消融和叙事补强**（用户同意："你做吧"）。
+  - 画像分级在开发集上做了三组消融（只写提示词 / 不分级 / 只用搜索词），并原样重跑一次。50 题上同一配置重跑就差 6 个点（82% → 76%），三组的成功率分不出来。提升主要来自把最近搜索词用起来（用上的都比第四版高 12–18 个点）；不分级时拿无关牌子去搜的题从 4–5 道涨到 14 道；"偏好当排序参考"这一层看不出作用（`docs/harness_design.md` 第十节末尾）。
+  - 补了"问完用户后又做了几个动作才下单"的事后分析（`eval/consent_gap.py`，只读已有日志）。插件版对话中途的下单里，问完马上买的 23 次全部点了头，做了 9 个以上动作的 24 次全部没点头。
+  - 叙事和简历按"每条信息都带出处，按出处决定能不能用"这条主线补强，等用户反馈。
 
 ### 2.2 可能的下一步
 
 1. 第四版还没解决的问题（第九节）：导购不接受用户的拒绝（33 题里 144 次没经同意的下单被拦）；收尾翻倍（用户要确认页面上没写的信息时拿不到同意）；买手重复打开同一件商品。
-2. `docs/narrative.md`、`docs/resume_draft.md`、`docs/resume_shopping_agent.tex` 已按分工导购 + 画像分级的新主线改写（2026-10-14），等用户反馈。
+2. `docs/narrative.md`、`docs/resume_draft.md`、`docs/resume_shopping_agent.tex` 已按分工导购 + 画像分级的新主线改写（2026-10-14），2026-10-15 又补了消融、"按出处决定能不能用"的主线和下单距离的数据，等用户反馈。
+3. 画像部分"系统整理"和"只写提示词"在开发集 50 题上分不出成功率。要在面试里讲硬，需要在画像测试集上跑"只写提示词"（`--profile-ablate prompt_only`），可能再加"不分级"，要用户同意。
+4. 换一个模型再跑一次（面试常问"换模型还有用吗"）。
 
 第三版当初的设计草图和拍板点都已实施，见 `docs/harness_design.md` 第八节；备选方向"harness 自动优化"用户担心会忽略场景本身的痛点，没有做。
 
@@ -82,10 +88,12 @@ pi-shop/roles.ts       第四版：前台导购 + 后台买手（--roles），�
                        - 导购的工具 find_products / show_candidates / buy；买手每次找货用 SDK 新开一个 pi 会话（buyer_sessions/）
                        - 通过 pi.events 的 "shop:api" 拿到适配层的商店接口；下单由系统按候选单回到商品页、点好规格再买
                        - SHOP_PROFILE_TIERS=1 时开画像分级：profileCues 按来源把画像整理进需求单（读 SHOP_PERSONA_FILE）
+                       - SHOP_PROFILE_ABLATE=flat / search_only：画像分级的消融（平时的偏好也当要求 / 偏好不进需求单），不设时不影响
 prompts/roles_sales.md 第四版导购的系统提示；prompts/roles_buyer.md 买手的系统提示
 prompts/persona_agent.md   画像设置：附在 agent 系统提示末尾的画像段（{persona} 换成这道题的画像）
 prompts/shopper_persona.md 画像设置：附在官方买家提示末尾的规则（只知道简版需求和规格；没想好的细节让 agent 挑、不编、不算购买条件）
 prompts/roles_profile.md   画像分级：导购怎么用画像（--profile-tiers 时加在画像段之前）
+prompts/ablation/          画像分级消融用的导购提示：roles_profile_flat.md（不分级）、roles_profile_prompt_only.md（只写提示词）
 prompts/base.md        基线系统提示（所有组共用，只有一句话）
 prompts/shopper.md     我们自己多轮设置的模拟买家提示（已冻结）
 runner/run.py          批量运行：reset → 写 reset_public.json → 启动干净的 pi 进程 → release → done.json
@@ -96,7 +104,8 @@ runner/run.py          批量运行：reset → 写 reset_public.json → 启动
                        已有 done.json 的题会跳过（中断后重跑同名即可续跑）。环境槽位满时 reset 会等待重试。
                        --state off|all|组件、--state-window K（第三版）；--roles（第四版，只能和 --paper-openings 一起用）。
                        --persona（画像设置，只能和 --paper-openings 一起用，开场白须按 --persona 生成）；
-                       --profile-tiers（画像分级，要和 --persona --roles 一起用）。
+                       --profile-tiers（画像分级，要和 --persona --roles 一起用）；
+                       --profile-ablate flat|search_only|prompt_only（画像分级的消融，要和 --profile-tiers 一起用，只在开发集上用过）。
 runner/paper_protocol.py   论文多轮规则：按官方 shopper.reset 拼买家系统提示（官方买家提示 + 完整需求 + 标准答案规格选项）；
                        画像设置下换成简版需求，并附上 prompts/shopper_persona.md
 scripts/export_tasks.py    导出 data/test_ids.json（作者 Final-200）、data/dev_ids.json、画像设置的 data/persona_{test,dev}_ids.json、
@@ -116,7 +125,7 @@ third_party/shopsim_official/  从官方仓库取的提示（没有许可证，g
                        shopper_paper.md（官方配置 multi_eval/configs/standard/qwen3_8b.yaml 里的买家提示 + 任务模板）、
                        agent_paper.md（官方 agent 提示改写成工具版，"论文提示词"对比组用）
 third_party/shopsim_hf/       官方 HF 数据（商品库、画像数据）
-docs/                  harness_design.md（设计方案和实施记录）、narrative.md（秋招叙事、简历写法、面试问答，还没按新主线改写）、
+docs/                  harness_design.md（设计方案和实施记录）、narrative.md（秋招叙事、面试问答，已按新主线改写）、
                        spotcheck_dev.md + traces/（单轮人工抽查，用户已确认）
 reference/             论文 shopsimulator.pdf、LongHorizon-Harness.pdf、作者博客 yyhdbl-shopping-agent-rl.html
 PLAN.md                最早的计划，已过时；以 README、docs/ 和本文件为准
@@ -137,6 +146,8 @@ curl -s -m 5 -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:5700/api/
 ```bash
 SHOPSIM_ENV_SLOTS=16 bash third_party/shopping-grpo-longhorizon/scripts/start_environment.sh
 ```
+
+启动时如果报找不到 `shop_env/data/items_eval_train.json`：这是商品数据的解压文件（140MB），2026-10-14 晚被删过一次。按环境安装脚本 `scripts/setup.sh` 里的同一步，从同目录的 `fine_items_eval_train_all.json.gz` 解压，核对 SHA-256 等于 `57b10950…559f`（完整值在 setup.sh 里）再改名，不要跑整个 setup.sh（它会装依赖）。另外本机设了 http_proxy，curl 检查要加 `--noproxy '*'`，否则代理会返回 502；runner 用的 Python urllib 不受影响。
 
 对 `third_party/` 的本地改动：环境配置里的 `exact_repeat_limit`、`no_progress_limit` 设为 999（原文件备份为 `environment.original.json`），`max_steps` 保持 35；`pack_api.py` 的 SERVER_HOST 从 `SHOPSIM_HOST` 读，默认 127.0.0.1。
 
@@ -189,7 +200,7 @@ python3 scripts/make_paper_openings.py --persona --tasks data/persona_dev_ids.js
 python3 runner/run.py --run-name dev_pers_v4 --paper-openings data/multiturn_paper/persona_dev_openings.jsonl --persona --roles --workers 6
 ```
 
-画像分级再加 `--profile-tiers`（`runs/dev_pers_v5`）。评测照常跑 `eval/evaluate.py`，再跑画像专用的分析（约束的信息在哪里、买下的商品满足了多少、点头了但买错、拿画像里无关的牌子去搜、同款重复上架；`--shopper` 是模拟用户质检）：
+画像分级再加 `--profile-tiers`（`runs/dev_pers_v5`）。消融再加 `--profile-ablate flat|search_only|prompt_only`（`runs/dev_pers_abl_*`，每组 4 个 worker，四组并行约 15 分钟）。评测照常跑 `eval/evaluate.py`，再跑画像专用的分析（约束的信息在哪里、买下的商品满足了多少、点头了但买错、拿画像里无关的牌子去搜、同款重复上架；`--shopper` 是模拟用户质检）：
 
 ```bash
 python3 eval/persona.py runs/dev_pers_v4
@@ -295,6 +306,8 @@ v2 + 规格补点（`--plugin all,closing,choice,spec_fill`，2026-10-14）：�
 | 画像分级（`--profile-tiers`） | 82% | 81% | 72% |
 | 对照：同样的开发集题目，用户知道完整需求、没有画像（第四版） | 74% | 没跑 | — |
 
+画像分级的消融（开发集 50 题，每组一次，2026-10-15）：只写提示词 76%、不分级 82%、只用搜索词 82%；画像分级原样重跑 76%（第一次 82%）。同一配置重跑的波动有 6 个点，三组的成功率分不出来；过程指标的区别和结论见 `docs/harness_design.md` 第十节末尾。
+
 ### runs 目录索引
 
 | 运行 | 内容 | 是否带评审 |
@@ -323,6 +336,10 @@ v2 + 规格补点（`--plugin all,closing,choice,spec_fill`，2026-10-14）：�
 | dev_pers_v4_smoke | 画像设置冒烟测试（2 题） | 否 |
 | dev_pers_v5 / dev_pers_v5_smoke | 画像开发集，画像分级：50 题 / 冒烟测试 5 题 | 否 |
 | test_pers_v4 / test_pers_v5 | 画像测试集 200 题：第四版不改 / 画像分级（用户同意的方案里最后一步） | 否 |
+| dev_pers_abl_prompt / dev_pers_abl_flat / dev_pers_abl_search | 画像开发集，画像分级的消融：只写提示词 / 不分级 / 只用搜索词 | 否 |
+| dev_pers_v5_rerun | 画像开发集，画像分级原样重跑一次（量同一配置的波动） | 否 |
+| dev_pers_abl_*_smoke | 消融的冒烟测试（各 1 题） | 否 |
+| dev_pers_v4/eval_flash、dev_pers_v5/eval_flash | 换评审模型后重评的结果（"用户点头后买对"和原来一样），原来的 `eval/` 没动 | — |
 | smoke* | 冒烟测试，可忽略 | 否 |
 
 ## 6. 评测器（单轮部分已由用户抽查确认并锁定）
@@ -344,7 +361,7 @@ v2 + 规格补点（`--plugin all,closing,choice,spec_fill`，2026-10-14）：�
   - 判定顺序：系统拦下了正确的购买 → 动作无效 → 没买成 → 买对了商品时看规格（单选项没点 = 规格没点；能推出来 = 规格没点 / 规格选错；推不出来 = 没问清需求）→ 正确商品满足的买的也都满足 = 替代品也满足需求 → 单轮实验也从没搜到 = 正确商品难搜到 → 用户说过、正确商品不满足而买的满足 = 标准答案有问题 → 用户说过某条正确商品更好的条件之后正确商品又出现 = 没回头（买的那件明确不满足的条件优先，这些全是用户没说过的就是没问清需求）→ 之后没再出现：对照的搜索词想得到 = 搜索词不对，否则没问清需求。"回合用完被迫下单""追查页面上没有的信息"作为附加标签。
   - 准确性：设计时看过两批，23 道全部对上，27 道里 22 道对上、5 道有争议，但都参与了定规则；没参与设计的 dev_paper_closing 先盲标 15 道再对答案，14 道一致（不一致的那道是页面本身说不清该选哪个规格）；提示词改几个字重跑 84 道，原因全部不变。抽查清单 `docs/diagnosis_check.md`（`scripts/make_diagnosis_check.py` 生成，附 Claude 的判断，**等用户确认**）。
 - **评审规则（2026-10-14 改过，只改论文多轮）**：下单前用户最后一次回复不是明确同意，决策质量最多 1 分；用户明确拒绝后仍然下单，0 分。轨迹里"购买完成"后面附一句下单前用户最后一次回复的原话（`judge._consent_note`）。改之前的分数在各运行的 `eval_old_judge/`。改法和结果见 `docs/harness_design.md` 第九节末尾。
-- **用户点头**（`eval/consent.py`，第 1 个面板，论文多轮的运行才有）：V4 Pro 读下单那个回合之前用户的最后一次回答，判成明确同意 / 没表态（还在补充需求或提问）/ 刚说完不买 / 没问过用户。"用户点头后买对" = 严格成功且明确同意。
+- **用户点头**（`eval/consent.py`，第 1 个面板，论文多轮的运行才有）：评审模型（`JUDGE_MODEL`）读下单那个回合之前用户的最后一次回答，判成明确同意 / 没表态（还在补充需求或提问）/ 刚说完不买 / 没问过用户。"用户点头后买对" = 严格成功且明确同意。`eval/consent_gap.py` 在这个结果上按"问完用户后又做了几个动作才下单"分组，收尾单单独统计（只读日志，不调模型）。
 - **评审看分工模式的轨迹**（`judge.render_roles`，2026-10-14 加）：按时间把导购的调用和它看到的候选单、买手和系统下单的商店动作（标出是谁做的）、对用户说的话、系统事件（没经同意的下单被拦、收尾提醒、不再派买手）排在一起；评审提示里多一段说明三方分工，要求当成一个整体 agent 评分。只在分工模式的运行上生效。改完后用缓存核对过：已评过的 9 组（测试集论文多轮 4 组、单轮 2 组、我们自己的多轮 3 组）重建评审输入全部命中缓存，渲染结果和改之前逐字相同。核对用 `scripts/check_judge_cache.py runs/<run> ...`：把 `llm._post` 换成直接报错的函数，对每题调用 `judge()`，报错就是没命中；以后改评测代码都可以用它确认旧结果不变。
 - **分工模式**（第四版）：用掉的回合按日志里对外动作的回合号算（`traj.turns_used`），不等于导购的 LLM 调用次数；token 含买手会话（`buyer_sessions/`）；收尾事件是 `roles_close_hard`。
 - **拦截审计**（`process.buy_blocks`，第 5 个面板）：harness 每拦下一次购买，看被拦时选的是不是正确商品和全对的规格（放行会不会严格成功），以及这些题最后有没有买对。
@@ -370,6 +387,7 @@ v2 + 规格补点（`--plugin all,closing,choice,spec_fill`，2026-10-14）：�
   - 2026-10-14：所有版本都按官方规则（对话结束时用户不满意也买最接近的那件），同时报告"用户点头后买对"；死循环按"对话结束"的官方定义修（"那就跟之前的对齐吧"），测试集成绩不动。
   - 2026-10-14：修完只补跑测试集上卡死的 3 题（"就跑卡死的3道吧"）；测试集上加跑对照组 v2 + 规格补点（"那你跑吧"）。
   - 2026-10-14：评审补上"对话中没点头就下单"的扣分，收尾时按规则买的照旧扣分，6 组全部重打（"改吧，全部重打吧"）。
+  - 2026-10-15：补强叙事的深度——画像分级的消融只在开发集上做，加上把"按出处决定能不能用"写成主线、补下单距离的数据（"你做吧"）。
 - 尚未拍板：个性化要不要做；空详情子页要不要拦（之前定的是保持现状，论文设置下回合是瓶颈，约五分之一的环境步花在空子页上，可以重新提给用户）。
 
 ## 8. 坑和注意事项
@@ -397,7 +415,7 @@ v2 + 规格补点（`--plugin all,closing,choice,spec_fill`，2026-10-14）：�
 - **跑实验时不要改 `pi-shop/` 和 `prompts/`**：每道题启动新的 pi 进程时才读这些文件，中途改了，后面的题就用上了新代码。
 - **分工模式**：roles.ts 加载时通过 `pi.events.emit("shop:api", 回调)` 向适配层要商店接口，所以适配层必须先加载（runner 已经按这个顺序传 `-e`）；`context` 事件的处理函数是 await 的，系统替导购下单就在这里做；买手会话用自定义的最小 ResourceLoader，不发现任何扩展、技能和上下文文件。
 - 项目是 git 仓库：main 冻结，后续工作在 task-state 分支，推到 `git@github.com:Simcooe/harness-of-shop.git`（**公开仓库**，不能提交密钥；`.pi-clean/` 里有代理地址，已 gitignore）。`.gitignore` 里已有 `.env`、`third_party/`、`runs/`、`data/private/`；公开前还要考虑 `data/cache/`、含 query 原文的 `data/rubrics/`、`data/multiturn/`、`data/multiturn_paper/`（数据集许可不明）。
-- `docs/narrative.md`（简历和面试问答）还是旧主线，没按"会问问题的导购 agent + 论文多轮设置"改写；README 也还没写论文多轮的结果。
+- `docs/narrative.md`（叙事和面试问答）、`docs/resume_draft.md`、`docs/resume_shopping_agent.tex` 已按分工导购 + 画像分级的主线改写（2026-10-14、10-15）；README 还没写论文多轮的结果。
 
 ## 9. 不再是主线的旧方案（需要时参考）
 
