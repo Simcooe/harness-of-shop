@@ -15,7 +15,7 @@ agent 侧只拿到需求原文；gold、画像等字段不进入 pi 进程。每
 买家只知道简版需求和规格选项（runner/paper_protocol.py）。画像另存在 task_<id>/persona.json。
 画像分级（--profile-tiers，只和 --persona --roles 一起用）：第四版之上的改进，系统按来源把画像整理进需求单（pi-shop/roles.ts），
 导购的系统提示在画像段之前加上 prompts/roles_profile.md。
-画像分级的消融（--profile-ablate，只在开发集上用）：flat 平时的偏好也当要求；search_only 只用最近的搜索词；
+画像分级的消融（--profile-ablate）：flat 平时的偏好也当要求；search_only 只用最近的搜索词；
 prompt_only 系统不整理画像、同样的用法只写进导购提示。消融用的导购提示在 prompts/ablation/。
 """
 import argparse
