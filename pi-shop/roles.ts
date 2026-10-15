@@ -62,6 +62,8 @@ const BUYER_PROMPT_FILE = process.env.SHOP_BUYER_PROMPT_FILE ?? "";
 // 画像分级（画像设置下的改进，--profile-tiers）：画像里和这次商品有关的内容按来源写进需求单
 const PROFILE_TIERS = process.env.SHOP_PROFILE_TIERS === "1";
 const PERSONA_FILE = process.env.SHOP_PERSONA_FILE ?? "";
+// 画像分级的消融（--profile-ablate）：flat 让平时的偏好也当要求，search_only 只用最近的搜索词
+const PROFILE_ABLATE = process.env.SHOP_PROFILE_ABLATE ?? "";
 // 每次找货买手最多做几个商店动作；派买手时给对话和下单留的回合
 const BUYER_STEPS = 8;
 const RESERVE = 6;
@@ -103,6 +105,9 @@ const SHEET_PREF_NOTE = `
 - 需求单后面附的“用户平时的偏好”不是需求：只在几件商品其他方面差不多时用来排先后，不用逐条判，也不要因为不符合偏好就把更符合需求单的商品排到后面。`;
 
 const MAX_PREF_CUES = 3;
+
+/** 平时的偏好只做参考、不当要求；消融 flat 时和最近的搜索一样当要求。 */
+const isReference = (r: { source: string }) => r.source === "画像偏好" && PROFILE_ABLATE !== "flat";
 
 type Verdict = "符合" | "不符合" | "页面没写";
 
@@ -449,7 +454,8 @@ export default function (pi: ExtensionAPI) {
 			found.push({ id: "", slot, aspect: short(String(raw?.aspect ?? "").trim() || slot, 8), value, status: "已确认", quote, source });
 		}
 		if (dropped.length) log("state_log.jsonl", { kind: "profile_dropped", turn: shop.turn(), dropped });
-		return [...found.filter((r) => r.source === "画像搜索"), ...found.filter((r) => r.source === "画像偏好").slice(0, MAX_PREF_CUES)];
+		const prefs = PROFILE_ABLATE === "search_only" ? [] : found.filter((r) => r.source === "画像偏好").slice(0, MAX_PREF_CUES);
+		return [...found.filter((r) => r.source === "画像搜索"), ...prefs];
 	}
 
 	function scheduleRequirements(): void {
@@ -489,10 +495,11 @@ export default function (pi: ExtensionAPI) {
 			lastSheet = [];
 			return lastSheet;
 		}
-		const confirmed = reqs.filter((r) => r.status === "已确认" && r.source !== "画像偏好");
+		const confirmed = reqs.filter((r) => r.status === "已确认" && !isReference(r));
 		const relaxed = reqs.filter((r) => r.status === "无要求");
-		const prefs = reqs.filter((r) => r.status === "已确认" && r.source === "画像偏好");
-		const listing = confirmed.map((r) => `${r.id} ${r.aspect}：${r.value}${r.source === "画像搜索" ? "（来自用户最近的搜索）" : ""}`);
+		const prefs = reqs.filter((r) => r.status === "已确认" && isReference(r));
+		const from = (r: Req) => (r.source === "画像搜索" ? "（来自用户最近的搜索）" : r.source === "画像偏好" ? "（来自用户平时的偏好）" : "");
+		const listing = confirmed.map((r) => `${r.id} ${r.aspect}：${r.value}${from(r)}`);
 		if (relaxed.length) listing.push(`（用户说无所谓的方面：${relaxed.map((r) => r.aspect).join("、")}）`);
 		const prefLine = prefs.length ? `\n\n用户平时的偏好（不是需求，只在几件商品其他方面差不多时参考）：${prefs.map((r) => `${r.aspect}：${r.value}`).join("；")}` : "";
 		const byAsin = new Map(items.map((i) => [i.asin, i]));
@@ -568,7 +575,7 @@ export default function (pi: ExtensionAPI) {
 	/** 需求表一行的来源：用户原话，或者画像里的哪一部分。 */
 	function sourceNote(r: Req): string {
 		if (r.source === "画像搜索") return `画像：用户最近搜过「${short(r.quote, 40)}」（用户没亲口说过）`;
-		if (r.source === "画像偏好") return `画像：平时的偏好「${short(r.quote, 30)}」（只做参考，不是要求）`;
+		if (r.source === "画像偏好") return `画像：平时的偏好「${short(r.quote, 30)}」${isReference(r) ? "（只做参考，不是要求）" : "（用户没亲口说过）"}`;
 		return `原话「${short(r.quote, 40)}」`;
 	}
 
@@ -583,7 +590,7 @@ export default function (pi: ExtensionAPI) {
 			L.push("候选：（还没看过商品）");
 			return L.join("\n");
 		}
-		const confirmed = reqs.filter((r) => r.status === "已确认" && r.source !== "画像偏好");
+		const confirmed = reqs.filter((r) => r.status === "已确认" && !isReference(r));
 		L.push("候选（按符合程度排序）：");
 		picks.forEach((p, i) => {
 			const it = p.item;
@@ -670,7 +677,8 @@ export default function (pi: ExtensionAPI) {
 	function buyerTask(request: string, budget: number): string {
 		const L = [`找货任务（导购交给你的）：${request}`, "", profile ? "用户的需求单（系统按用户原话和用户画像整理）：" : "用户的需求单（系统按用户原话整理）："];
 		if (!reqs.length) L.push("  （还没有）");
-		const tag = (r: Req) => (r.source === "画像搜索" ? "（来自用户最近的搜索）" : r.source === "画像偏好" ? "（用户平时的偏好，只做参考）" : "");
+		const tag = (r: Req) =>
+			r.source === "画像搜索" ? "（来自用户最近的搜索）" : r.source !== "画像偏好" ? "" : isReference(r) ? "（用户平时的偏好，只做参考）" : "（来自用户平时的偏好）";
 		for (const r of reqs) L.push(`  ${r.id} ${r.aspect}：${reqValue(r)}${tag(r)}`);
 		const unknown = unknownSlots();
 		if (unknown.length) L.push(`  还不知道：${unknown.join("、")}`);
@@ -678,7 +686,7 @@ export default function (pi: ExtensionAPI) {
 			// 用户自己最近搜过的词往往就是最准的搜索词
 			const used = profile.recent.filter((s) => reqs.some((r) => r.source === "画像搜索" && quotedFrom(r.quote, s)));
 			if (used.length) L.push(`用户最近在商城里搜过：${used.map((s) => `「${s}」`).join("")}（和这次要买的有关，可以直接拿来当搜索词）`);
-			if (reqs.some((r) => r.source === "画像偏好")) {
+			if (reqs.some(isReference)) {
 				L.push("用户平时的偏好不是要求：不要只拿偏好里的品牌去搜，也不要因为不是这个牌子就放过更符合需求的商品。");
 			}
 		}

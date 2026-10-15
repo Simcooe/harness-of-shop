@@ -15,6 +15,8 @@ agent 侧只拿到需求原文；gold、画像等字段不进入 pi 进程。每
 买家只知道简版需求和规格选项（runner/paper_protocol.py）。画像另存在 task_<id>/persona.json。
 画像分级（--profile-tiers，只和 --persona --roles 一起用）：第四版之上的改进，系统按来源把画像整理进需求单（pi-shop/roles.ts），
 导购的系统提示在画像段之前加上 prompts/roles_profile.md。
+画像分级的消融（--profile-ablate，只在开发集上用）：flat 平时的偏好也当要求；search_only 只用最近的搜索词；
+prompt_only 系统不整理画像、同样的用法只写进导购提示。消融用的导购提示在 prompts/ablation/。
 """
 import argparse
 import json
@@ -52,6 +54,12 @@ BASE_PROMPT = ROOT / "prompts" / "base.md"
 SALES_PROMPT = ROOT / "prompts" / "roles_sales.md"
 BUYER_PROMPT = ROOT / "prompts" / "roles_buyer.md"
 PROFILE_PROMPT = ROOT / "prompts" / "roles_profile.md"
+# 画像分级的消融：每组去掉一处，导购提示换成和这组做法一致的说法
+PROFILE_ABLATIONS = {
+    "flat": ROOT / "prompts" / "ablation" / "roles_profile_flat.md",
+    "search_only": PROFILE_PROMPT,
+    "prompt_only": ROOT / "prompts" / "ablation" / "roles_profile_prompt_only.md",
+}
 
 print_lock = threading.Lock()
 
@@ -162,7 +170,7 @@ def run_task(task_id: int, args, run_dir: Path, base_env: dict, system_prompt: s
             shopper_query = short_query(reset)
             if not opening.get("persona") or str(opening.get("shopper_query", "")).strip() != shopper_query:
                 raise RuntimeError("开场白不是按这道题的简版需求生成的")
-            profile_how = f"\n\n{PROFILE_PROMPT.read_text(encoding='utf-8').strip()}" if args.profile_tiers else ""
+            profile_how = f"\n\n{args.profile_prompt.read_text(encoding='utf-8').strip()}" if args.profile_tiers else ""
             task_prompt = f"{system_prompt}{profile_how}\n\n{persona_agent_block(profile)}"
             (task_dir / "persona.json").write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n")
         public = {k: v for k, v in reset.items() if k not in PRIVATE_RESET_KEYS}
@@ -219,8 +227,9 @@ def run_task(task_id: int, args, run_dir: Path, base_env: dict, system_prompt: s
             SHOP_ROLES="1" if args.roles else "0",
             SHOP_BUYER_PROMPT_FILE=str(BUYER_PROMPT) if args.roles else "",
             SHOP_BUYER_MODEL=args.model,
-            SHOP_PROFILE_TIERS="1" if args.profile_tiers else "0",
-            SHOP_PERSONA_FILE=str(task_dir / "persona.json") if args.profile_tiers else "",
+            SHOP_PROFILE_TIERS="1" if args.profile_tiers and args.profile_ablate != "prompt_only" else "0",
+            SHOP_PERSONA_FILE=str(task_dir / "persona.json") if args.profile_tiers and args.profile_ablate != "prompt_only" else "",
+            SHOP_PROFILE_ABLATE=args.profile_ablate,
         )
         with open(task_dir / "events.jsonl", "w") as out, open(task_dir / "stderr.log", "w") as err:
             try:
@@ -262,6 +271,9 @@ def main() -> None:
     parser.add_argument("--paper-openings", default="", help="论文多轮模式：买家开场白（data/multiturn_paper/<split>_openings.jsonl），自动开启 ask")
     parser.add_argument("--persona", action="store_true", help="画像设置：agent 拿到用户画像，买家只知道简版需求；开场白须按 --persona 生成")
     parser.add_argument("--profile-tiers", action="store_true", help="画像分级：按来源把画像整理进第四版的需求单（需 --persona --roles）")
+    parser.add_argument("--profile-ablate", default="", choices=["", *PROFILE_ABLATIONS],
+                        help="画像分级的消融（需 --profile-tiers）：flat 平时的偏好也当要求；search_only 只用最近的搜索词；"
+                             "prompt_only 系统不整理画像，同样的用法只写进导购提示")
     parser.add_argument("--ask", action="store_true", help="提供 ask_shopper 工具（模拟买家回答）")
     parser.add_argument("--shopper-model", default="qwen3.7-plus")
     parser.add_argument("--shopper-prompt-file", type=Path, default=None, help="默认：论文模式用官方买家提示，否则 prompts/shopper.md")
@@ -285,6 +297,9 @@ def main() -> None:
         sys.exit("--persona 只用于论文多轮设置（--paper-openings）")
     if args.profile_tiers and not (args.persona and args.roles):
         sys.exit("--profile-tiers 要和 --persona --roles 一起用")
+    if args.profile_ablate and not args.profile_tiers:
+        sys.exit("--profile-ablate 要和 --profile-tiers 一起用")
+    args.profile_prompt = PROFILE_ABLATIONS.get(args.profile_ablate, PROFILE_PROMPT)
     if args.system_prompt_file is None:
         args.system_prompt_file = str(SALES_PROMPT if args.roles else BASE_PROMPT)
     if paper:
@@ -339,7 +354,8 @@ def main() -> None:
         "persona_agent_block": PERSONA_AGENT_BLOCK.read_text(encoding="utf-8").strip() if args.persona else None,
         "persona_shopper_rule": PERSONA_SHOPPER_RULE.read_text(encoding="utf-8").strip() if args.persona else None,
         "profile_tiers": args.profile_tiers,
-        "profile_prompt": PROFILE_PROMPT.read_text(encoding="utf-8").strip() if args.profile_tiers else None,
+        "profile_prompt": args.profile_prompt.read_text(encoding="utf-8").strip() if args.profile_tiers else None,
+        "profile_ablate": args.profile_ablate or None,
         "system_prompt": system_prompt,
         "max_llm_turns": args.max_llm_turns,
         "n_tasks": len(task_ids),
